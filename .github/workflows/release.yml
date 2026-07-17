@@ -1,0 +1,91 @@
+# Desktop release workflow for Student Planner.
+#
+# The app code lives in the PRIVATE `Jerit3787/planner` repo; this public repo
+# only hosts the built releases (so end users and the updater can download them).
+# This workflow checks out planner's code with a PAT, builds the Tauri desktop
+# app on each platform, and publishes signed installers + the updater manifest
+# (latest.json) as a release HERE — which is what the updater endpoint in
+# planner's tauri.conf.json points at.
+#
+# Run it from the Actions tab ("Run workflow"), choosing the planner branch/tag
+# to build (defaults to `dev`, planner's production branch). The release version
+# comes from planner's own package.json, so bump that in planner first.
+#
+# Required secrets on THIS repo:
+#   PLANNER_PAT                          fine-grained PAT, contents:read on Jerit3787/planner
+#   TAURI_SIGNING_PRIVATE_KEY            updater signing key (same keypair whose public
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   half is committed in planner's tauri.conf.json)
+
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'planner branch or tag to build'
+        default: dev
+        required: true
+
+permissions:
+  contents: write            # create the release on this (planner-release) repo
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      max-parallel: 1        # serialize so tauri-action's latest.json updates don't race
+      matrix:
+        include:
+          - platform: macos-latest      # Apple Silicon + Intel via the universal target
+            args: '--target universal-apple-darwin'
+          - platform: ubuntu-latest
+            args: ''
+          - platform: windows-latest
+            args: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout the private planner code
+        uses: actions/checkout@v4
+        with:
+          repository: Jerit3787/planner
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PLANNER_PAT }}
+
+      - name: Node.js setup
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Rust setup
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Linux system dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev
+
+      - name: Install app dependencies
+        run: npm ci
+
+      - name: Build the app and publish the release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS/Windows code signing intentionally NOT wired yet (unsigned build).
+        with:
+          args: ${{ matrix.args }}
+          tagName: v__VERSION__ # tauri-action replaces __VERSION__ with planner's app version
+          releaseName: 'Student Planner v__VERSION__'
+          releaseBody: 'Desktop build of Student Planner. Download the installer for your platform below; installed copies auto-update from future releases.'
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
