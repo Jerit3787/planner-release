@@ -144,19 +144,66 @@ jobs:
       - name: Initialize the Android project
         run: npm run tauri android init
 
-      - name: Build the Android APK (debug — see note above)
-        run: npm run tauri android build -- --apk --debug
+      # Adds REQUEST_INSTALL_PACKAGES (needed for the in-app updater to launch the
+      # system installer on the downloaded APK) and, when the keystore secret is
+      # present, wires real release signing into the generated Gradle project so
+      # updates can install over each other (debug-signed APKs can't — the key
+      # differs per build). Falls back to a debug build when no keystore is set.
+      - name: Configure the Android project (install permission + signing)
+        id: signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          GEN=src-tauri/gen/android
+          MANIFEST="$GEN/app/src/main/AndroidManifest.xml"
+
+          # 1) install permission (idempotent) so the updater can launch the installer
+          if ! grep -q 'REQUEST_INSTALL_PACKAGES' "$MANIFEST"; then
+            perl -0pi -e 's/(<manifest[^>]*>)/$1\n    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" \/>/' "$MANIFEST"
+          fi
+
+          # 2) release signing — only if the keystore secret is provided
+          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "No ANDROID_KEYSTORE_BASE64 secret — building a DEBUG apk."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$GEN/release.jks"
+          {
+            echo "storeFile=$(pwd)/$GEN/release.jks"
+            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
+            echo "keyPassword=$ANDROID_KEY_PASSWORD"
+          } > "$GEN/keystore.properties"
+
+          python3 .github/scripts/patch-android-signing.py "$GEN/app/build.gradle.kts"
+          echo "Release signing configured."
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build the Android APK
+        run: |
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            npm run tauri android build -- --apk
+          else
+            npm run tauri android build -- --apk --debug
+          fi
 
       - name: Collect and rename the APK(s)
         id: apk
         run: |
           VERSION="$(node -p "require('./package.json').version")"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          SUFFIX="$([ "${{ steps.signing.outputs.signed }}" = "true" ] && echo release || echo debug)"
           mkdir -p android-out
           i=0
           while IFS= read -r f; do
-            arch="$(basename "$(dirname "$(dirname "$f")")")"   # .../apk/<arch>/debug/x.apk
-            cp "$f" "android-out/student-planner_${VERSION}_${arch:-android}-debug.apk"
+            arch="$(basename "$(dirname "$(dirname "$f")")")"   # .../apk/<arch>/<buildtype>/x.apk
+            cp "$f" "android-out/student-planner_${VERSION}_${arch:-android}-${SUFFIX}.apk"
             i=$((i+1))
           done < <(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk')
           echo "count=$i"
