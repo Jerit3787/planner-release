@@ -1,28 +1,52 @@
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/Jerit3787/planner-release/main/docs/icon.svg" width="72" alt="Student Planner" />
+
 # Student Planner — Releases
 
-Public download host for the **Student Planner** desktop app.
+**Offline-first planner for classes, homework, quizzes, finals, and your GPA.**
 
-The app is a static, offline-first PWA — use it in your browser at
-**[planner.danplace.tech](https://planner.danplace.tech)** (installable as a PWA),
-or download the desktop build below.
+[![Latest release](https://img.shields.io/github/v/release/Jerit3787/planner-release?label=latest&color=1e88e5)](https://github.com/Jerit3787/planner-release/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/Jerit3787/planner-release/total?color=1e88e5)](https://github.com/Jerit3787/planner-release/releases)
+&nbsp;·&nbsp; macOS · Windows · Linux · Android
 
-## Downloads
+### [⬇️ Download page](https://jerit3787.github.io/planner-release/) &nbsp;·&nbsp; [🌐 Web app](https://planner.danplace.tech) &nbsp;·&nbsp; [📖 Docs](https://docs.planner.danplace.tech)
 
-Grab the installer for your platform from the [latest release](../../releases/latest):
+</div>
 
-- **macOS** — `.dmg` (universal: Apple Silicon + Intel)
-- **Windows** — `.exe` / `.msi`
-- **Linux** — `.AppImage` / `.deb`
+---
 
-Installed copies **auto-update** from future releases.
+This repository hosts the downloadable **desktop and Android builds** of Student Planner.
+The best way to grab the app is the **[download page](https://jerit3787.github.io/planner-release/)**,
+which auto-detects your platform — or go straight to the **[latest release](https://github.com/Jerit3787/planner-release/releases/latest)**.
 
-> The desktop app is currently unsigned, so macOS Gatekeeper / Windows SmartScreen
-> may warn on first launch. Open it via right-click → Open (macOS) or "More info →
-> Run anyway" (Windows).
+Prefer not to install anything? Student Planner runs entirely in your browser and installs as a
+PWA at **[planner.danplace.tech](https://planner.danplace.tech)**.
 
-## For maintainers
+<details>
+<summary><b>Downloads by platform</b></summary>
 
-The app source is in the private `planner` repo. Releases here are built by
-`.github/workflows/release.yml`, triggered manually from the **Actions** tab
-(pick the `planner` branch/tag to build; the version comes from planner's
-`package.json`). See that file's header for the required repo secrets.
+Each [release](https://github.com/Jerit3787/planner-release/releases/latest) includes:
+
+| Platform | File |
+| --- | --- |
+| 🍎 macOS (Apple Silicon + Intel) | `.dmg` |
+| 🪟 Windows | `-setup.exe` / `.msi` |
+| 🐧 Linux | `.AppImage` · `.deb` · `.rpm` |
+| 🤖 Android | `.apk` (release-signed) |
+
+Installed copies **auto-update** from future releases. Desktop builds are currently unsigned, so
+on first launch macOS may need right-click → **Open** and Windows **More info → Run anyway**.
+Every release lists **SHA-256 checksums** so you can verify your download.
+
+</details>
+
+<details>
+<summary><b>For maintainers</b></summary>
+
+The app source lives in the private `planner` repo. Releases here are built by
+`.github/workflows/release.yml` (run it from the **Actions** tab; it checks out the private
+code via `PLANNER_PAT`, builds every platform, signs them, and publishes here). The download
+page is `docs/index.html`, served via GitHub Pages from `main` `/docs`.
+
+</details>
