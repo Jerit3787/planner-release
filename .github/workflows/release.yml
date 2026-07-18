@@ -130,7 +130,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-          cache: 'gradle'         # cache the Gradle dependency/wrapper store
+          # No `cache: gradle` here — the Gradle project doesn't exist until
+          # `tauri android init` runs later, so setup-java's cache step fails at
+          # this point with "No file matched ... gradle*" (planner issue: Android
+          # release build failed). Gradle deps are still cached via the Rust/NDK
+          # caches + the runner's own tooling.
 
       - name: Android SDK setup
         uses: android-actions/setup-android@v3
