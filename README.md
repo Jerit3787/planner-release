@@ -10,14 +10,14 @@
 [![Downloads](https://img.shields.io/github/downloads/Jerit3787/planner-release/total?color=1e88e5)](https://github.com/Jerit3787/planner-release/releases)
 &nbsp;·&nbsp; macOS · Windows · Linux · Android
 
-### [⬇️ Download page](https://jerit3787.github.io/planner-release/) &nbsp;·&nbsp; [🌐 Web app](https://planner.danplace.tech) &nbsp;·&nbsp; [📖 Docs](https://docs.planner.danplace.tech)
+### [⬇️ Download](https://planner.danplace.tech/#download) &nbsp;·&nbsp; [🌐 Web app](https://planner.danplace.tech) &nbsp;·&nbsp; [📖 Docs](https://docs.planner.danplace.tech)
 
 </div>
 
 ---
 
 This repository hosts the downloadable **desktop and Android builds** of Student Planner.
-The best way to grab the app is the **[download page](https://jerit3787.github.io/planner-release/)**,
+The best way to grab the app is the **[download section on planner.danplace.tech](https://planner.danplace.tech/#download)**,
 which auto-detects your platform — or go straight to the **[latest release](https://github.com/Jerit3787/planner-release/releases/latest)**.
 
 Prefer not to install anything? Student Planner runs entirely in your browser and installs as a
@@ -46,7 +46,8 @@ Every release lists **SHA-256 checksums** so you can verify your download.
 
 The app source lives in the private `planner` repo. Releases here are built by
 `.github/workflows/release.yml` (run it from the **Actions** tab; it checks out the private
-code via `PLANNER_PAT`, builds every platform, signs them, and publishes here). The download
-page is `docs/index.html`, served via GitHub Pages from `main` `/docs`.
+code via `PLANNER_PAT`, builds every platform, signs them, and publishes here). The public
+download UI lives in the planner site itself (`src/index.html`, the `#download` section), which
+reads this repo's latest release via the GitHub API — there's no separate site to maintain.
 
 </details>
