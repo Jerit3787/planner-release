@@ -24,12 +24,17 @@ on:
         description: 'planner branch or tag to build'
         default: dev
         required: true
+      desktop:
+        description: 'Build the desktop installers (uncheck to re-run Android only against the existing release)'
+        type: boolean
+        default: true
 
 permissions:
   contents: write            # create the release on this (planner-release) repo
 
 jobs:
   release:
+    if: ${{ inputs.desktop }}
     strategy:
       fail-fast: false
       max-parallel: 1        # serialize so tauri-action's latest.json updates don't race
@@ -98,6 +103,9 @@ jobs:
   # the in-app updater actually work; until then this is a downloadable preview.
   android:
     needs: release
+    # Runs after the desktop release, or on its own when `desktop` is unchecked
+    # (release skipped) — but not if the desktop build actually failed.
+    if: ${{ always() && needs.release.result != 'failure' && needs.release.result != 'cancelled' }}
     runs-on: ubuntu-latest
     env:
       NDK_VERSION: '26.3.11579264'
@@ -212,4 +220,4 @@ jobs:
       - name: Attach the APK(s) to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ steps.apk.outputs.tag }}" android-out/*.apk --clobber
+        run: gh release upload "${{ steps.apk.outputs.tag }}" android-out/*.apk --repo Jerit3787/planner-release --clobber
