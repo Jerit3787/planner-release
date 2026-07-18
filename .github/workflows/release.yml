@@ -181,7 +181,7 @@ jobs:
             echo "keyPassword=$ANDROID_KEY_PASSWORD"
           } > "$GEN/keystore.properties"
 
-          python3 .github/scripts/patch-android-signing.py "$GEN/app/build.gradle.kts"
+          python3 src-tauri/scripts/patch-android-signing.py "$GEN/app/build.gradle.kts"
           echo "Release signing configured."
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
