@@ -1,0 +1,76 @@
+# Debug (dev) build for inspecting the installed app. A Tauri debug build has
+# the webview devtools enabled (right-click → Inspect Element), unlike the
+# release builds the main Release workflow produces. Builds from the private
+# planner repo and uploads the installer as a workflow artifact (NOT a public
+# release). Run it from the Actions tab.
+#
+# Defaults to macOS (arm64) — pick a different platform via the `platform` input.
+# Updater artifacts are disabled for debug builds, so no signing keys are needed.
+name: Debug build
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'planner branch or tag to build'
+        default: dev
+        required: true
+      platform:
+        description: 'Runner to build on'
+        type: choice
+        default: macos-latest
+        options:
+          - macos-latest
+          - windows-latest
+          - ubuntu-latest
+
+jobs:
+  debug:
+    runs-on: ${{ inputs.platform }}
+    steps:
+      - name: Checkout the private planner code
+        uses: actions/checkout@v4
+        with:
+          repository: Jerit3787/planner
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PLANNER_PAT }}
+
+      - name: Node.js setup
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Rust setup
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          cache-on-failure: true
+
+      - name: Install Linux system dependencies (ubuntu only)
+        if: inputs.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev
+
+      - name: Install app dependencies
+        run: npm ci
+
+      # Debug build (devtools on). Disable updater artifacts so no signing key is
+      # needed — this build is for local inspection, not for the auto-updater.
+      - name: Build the debug app
+        run: npm run tauri build -- --debug --config "{\"bundle\":{\"createUpdaterArtifacts\":false}}"
+
+      - name: Upload the debug installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: student-planner-debug-${{ inputs.platform }}
+          path: |
+            src-tauri/target/debug/bundle/dmg/*.dmg
+            src-tauri/target/debug/bundle/macos/*.app
+            src-tauri/target/debug/bundle/nsis/*.exe
+            src-tauri/target/debug/bundle/deb/*.deb
+            src-tauri/target/debug/bundle/appimage/*.AppImage
+          if-no-files-found: warn
