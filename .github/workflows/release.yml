@@ -235,3 +235,41 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ steps.apk.outputs.tag }}" android-out/*.apk --repo Jerit3787/planner-release --clobber
+
+  # Once every asset (desktop + Android) is on the release, rewrite the release
+  # notes with a curated download table + SHA-256 checksums so users can verify
+  # their download. Runs after Android (the last asset-producing job).
+  finalize:
+    needs: [release, android]
+    if: ${{ always() && needs.android.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the private planner code
+        uses: actions/checkout@v4
+        with:
+          repository: Jerit3787/planner
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PLANNER_PAT }}
+
+      - name: Resolve version tag
+        id: v
+        run: echo "tag=v$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Download the release's assets (to hash them)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p rel-assets
+          gh release download "${{ steps.v.outputs.tag }}" \
+            --repo Jerit3787/planner-release --dir rel-assets
+
+      - name: Generate and apply the release notes (with checksums)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VER="$(jq -r .version package.json)"
+          python3 src-tauri/scripts/gen-release-notes.py \
+            "$VER" rel-assets Jerit3787/planner-release > body.md
+          echo "----- generated body -----"; cat body.md
+          gh release edit "${{ steps.v.outputs.tag }}" \
+            --repo Jerit3787/planner-release --notes-file body.md
