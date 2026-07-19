@@ -186,6 +186,20 @@ jobs:
       - name: Initialize the Android project
         run: npm run tauri android init
 
+      # `tauri icon` only writes straight into gen/android/app/src/main/res/ if
+      # that directory ALREADY EXISTS at the moment it runs (see tauri-cli's own
+      # icon.rs) — otherwise it falls back to a standalone src-tauri/icons/android/
+      # folder that nothing ever automatically consumes. Since gen/android didn't
+      # exist yet on the machine that originally generated icons/android/ (a local
+      # dev machine, not CI), those regenerated icons landed in that inert
+      # fallback location and every CI build kept silently using Tauri's own
+      # placeholder template icon instead (confirmed live: v2.126.8's real
+      # released APK still had it). tauri android init (just above) always
+      # regenerates gen/android fresh, so this copies the actual generated icons
+      # over the freshly-created project's placeholders every single build.
+      - name: Apply the app's own Android launcher icon
+        run: cp -R src-tauri/icons/android/. src-tauri/gen/android/app/src/main/res/
+
       # Adds REQUEST_INSTALL_PACKAGES (needed for the in-app updater to launch the
       # system installer on the downloaded APK), patches MainActivity.kt so the
       # status bar/nav bar don't render over app content (planner issue #242 —
