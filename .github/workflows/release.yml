@@ -200,6 +200,20 @@ jobs:
       - name: Apply the app's own Android launcher icon
         run: cp -R src-tauri/icons/android/. src-tauri/gen/android/app/src/main/res/
 
+      # Real FCM push notifications, Android only (src-tauri/src/lib.rs
+      # explains why desktop isn't in scope yet). google-services.json has to
+      # live in the generated app/ dir every build (gen/android is regenerated
+      # fresh each time, so it can't just be committed there), and neither
+      # tauri android init nor tauri-plugin-notifications wires the
+      # google-services Gradle plugin in automatically — patch-android-
+      # firebase.py adds the classpath + plugin application by hand.
+      - name: Wire up Firebase Cloud Messaging for Android
+        run: |
+          cp src-tauri/google-services.json src-tauri/gen/android/app/google-services.json
+          python3 src-tauri/scripts/patch-android-firebase.py \
+            src-tauri/gen/android/build.gradle.kts \
+            src-tauri/gen/android/app/build.gradle.kts
+
       # Adds REQUEST_INSTALL_PACKAGES (needed for the in-app updater to launch the
       # system installer on the downloaded APK), patches MainActivity.kt so the
       # status bar/nav bar don't render over app content (planner issue #242 —
