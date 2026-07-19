@@ -187,11 +187,17 @@ jobs:
         run: npm run tauri android init
 
       # Adds REQUEST_INSTALL_PACKAGES (needed for the in-app updater to launch the
-      # system installer on the downloaded APK) and, when the keystore secret is
-      # present, wires real release signing into the generated Gradle project so
-      # updates can install over each other (debug-signed APKs can't — the key
-      # differs per build). Falls back to a debug build when no keystore is set.
-      - name: Configure the Android project (install permission + signing)
+      # system installer on the downloaded APK), patches MainActivity.kt so the
+      # status bar/nav bar don't render over app content (planner issue #242 —
+      # Tauri's own template calls enableEdgeToEdge() at targetSdk 36, which
+      # makes edge-to-edge mandatory with no manifest opt-out; confirmed live
+      # that without this, system bar icons and the 3-button nav bar sat
+      # directly on top of the topbar and the FAB/bottom buttons), and, when
+      # the keystore secret is present, wires real release signing into the
+      # generated Gradle project so updates can install over each other
+      # (debug-signed APKs can't — the key differs per build). Falls back to
+      # a debug build when no keystore is set.
+      - name: Configure the Android project (install permission + insets + signing)
         id: signing
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -202,13 +208,18 @@ jobs:
           set -euo pipefail
           GEN=src-tauri/gen/android
           MANIFEST="$GEN/app/src/main/AndroidManifest.xml"
+          IDENTIFIER="$(node -p "require('./src-tauri/tauri.conf.json').identifier")"
+          MAIN_ACTIVITY="$GEN/app/src/main/java/$(echo "$IDENTIFIER" | tr '.' '/')/MainActivity.kt"
 
           # 1) install permission (idempotent) so the updater can launch the installer
           if ! grep -q 'REQUEST_INSTALL_PACKAGES' "$MANIFEST"; then
             perl -0pi -e 's/(<manifest[^>]*>)/$1\n    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" \/>/' "$MANIFEST"
           fi
 
-          # 2) release signing — only if the keystore secret is provided
+          # 2) system-bar insets (idempotent — see patch-android-insets.py)
+          python3 src-tauri/scripts/patch-android-insets.py "$MAIN_ACTIVITY"
+
+          # 3) release signing — only if the keystore secret is provided
           if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
             echo "No ANDROID_KEYSTORE_BASE64 secret — building a DEBUG apk."
             echo "signed=false" >> "$GITHUB_OUTPUT"
