@@ -181,7 +181,7 @@ jobs:
           # caches + the runner's own tooling.
 
       - name: Android SDK setup
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Cache Android NDK
         id: ndk-cache
