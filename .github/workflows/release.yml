@@ -65,7 +65,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout the private planner code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Jerit3787/planner
           ref: ${{ inputs.ref }}
@@ -157,7 +157,7 @@ jobs:
       NDK_VERSION: '26.3.11579264'
     steps:
       - name: Checkout the private planner code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Jerit3787/planner
           ref: ${{ inputs.ref }}
@@ -332,7 +332,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout the private planner code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Jerit3787/planner
           ref: ${{ inputs.ref }}
