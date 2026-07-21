@@ -42,6 +42,21 @@ Every release lists **SHA-256 checksums** so you can verify your download.
 </details>
 
 <details>
+<summary><b>Minimum supported versions</b></summary>
+
+| Platform | Minimum | Notes |
+| --- | --- | --- |
+| 🍎 macOS | **13.0 (Ventura)** | Universal build (Apple Silicon + Intel) |
+| 🪟 Windows | **10** (1809) or later | x64 or ARM64; the WebView2 Runtime auto-installs if missing |
+| 🐧 Linux | `webkit2gtk-4.1` — **Ubuntu 22.04 / Debian 12** or newer, roughly | Prebuilt binaries are compiled on Ubuntu 24.04 runners (glibc ≥2.39); AppImage is the most portable format on an older base |
+| 🤖 Android | **7.0 (API 24)** or later | Sideloaded APK |
+
+See the [full system requirements page](https://docs.planner.danplace.tech/getting-started/system-requirements/)
+(also covers the web app/PWA) for details.
+
+</details>
+
+<details>
 <summary><b>For maintainers</b></summary>
 
 The app source lives in the private `planner` repo. Releases here are built by
