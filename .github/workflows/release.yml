@@ -121,7 +121,12 @@ jobs:
           releaseBody: 'Desktop build of Student Planner. Download the installer for your platform below; installed copies auto-update from future releases.'
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          # Renamed by a newer tauri-action release - was includeUpdaterJson,
+          # which now just produces a harmless "Unexpected input(s)" warning
+          # on every run (the updater artifacts still got uploaded regardless,
+          # since uploadUpdaterJson defaults to true either way - but worth
+          # fixing so the warning stops rather than relying on that default).
+          uploadUpdaterJson: true
 
       # tauri.macos.conf.json sets bundle.targets to ["app"] (not "dmg") so
       # Tauri's own bundler doesn't produce a DMG missing the widget — this
