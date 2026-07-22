@@ -37,7 +37,21 @@ jobs:
     if: ${{ inputs.desktop }}
     strategy:
       fail-fast: false
-      max-parallel: 1        # serialize so tauri-action's latest.json updates don't race
+      # Was max-parallel: 1 (serialized, one platform at a time) — added
+      # defensively against tauri-action's own latest.json (the updater
+      # manifest) potentially racing if two matrix jobs read-modify-wrote it
+      # concurrently. Removed to actually build in parallel (user-requested,
+      # and this repo's own 5-way matrix serialized was taking ~35-40min wall
+      # clock for what could be a single job's worth of time) — this matches
+      # Tauri's own official example workflow (v2.tauri.app/distribute/
+      # pipelines/github/), which runs its multi-platform matrix fully in
+      # parallel with no serialization at all, so tauri-action is expected to
+      # handle concurrent uploads to the same release safely. If latest.json
+      # ever turns up missing an entry for some platform after a release
+      # (the one real failure mode this was guarding against), that's the
+      # first thing to check — re-running just the affected platform's job
+      # against the existing release/tag should repair it without needing to
+      # rebuild everything.
       matrix:
         include:
           - platform: macos-latest      # Apple Silicon + Intel via the universal target
