@@ -33,7 +33,63 @@ permissions:
   contents: write            # create the release on this (planner-release) repo
 
 jobs:
+  # Creates (or, when `desktop` is unchecked, resolves) the GitHub release that
+  # every other job uploads assets to. Pulled out into its own job so the
+  # desktop matrix and the android job can both depend on THIS instead of
+  # android depending on the desktop matrix finishing first — that's what
+  # actually let the two build in parallel instead of android waiting behind
+  # all 5 desktop platforms (user-requested: "build android also together").
+  # tauri-action's own release-creation (used by each matrix job below) is
+  # given this job's releaseId instead, so it uploads to the release created
+  # here rather than each matrix job racing to create its own.
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.rel.outputs.release_id }}
+      tag: ${{ steps.rel.outputs.tag }}
+    steps:
+      - name: Checkout the private planner code
+        uses: actions/checkout@v7
+        with:
+          repository: Jerit3787/planner
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PLANNER_PAT }}
+
+      - name: Ensure the GitHub release exists and resolve its numeric id
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # tauri-action's own tagName (v__VERSION__ below) is substituted from
+          # src-tauri/tauri.conf.json's version, NOT package.json's — the two
+          # can genuinely diverge (package.json bumps on every web-only deploy;
+          # tauri.conf.json/Cargo.toml only bump for an actual native release).
+          # A real, live-hit bug from exactly this mismatch: package.json was at
+          # 2.126.49 while tauri.conf.json was still 2.126.47, so tauri-action
+          # published under tag v2.126.47 while this job (and the embed-widget/
+          # android steps, now all fixed to match) computed v2.126.49 — "release
+          # not found" on upload. Read tauri.conf.json here to match.
+          VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
+          TAG="v${VERSION}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          if gh release view "$TAG" --repo Jerit3787/planner-release >/dev/null 2>&1; then
+            echo "Release $TAG already exists — reusing it (desktop unchecked, or a repair re-run)."
+          else
+            echo "Release $TAG doesn't exist yet — creating it so desktop + android can upload in parallel."
+            gh release create "$TAG" \
+              --repo Jerit3787/planner-release \
+              --title "Student Planner $TAG" \
+              --notes "Desktop build of Student Planner. Download the installer for your platform below; installed copies auto-update from future releases." \
+              --target "$(git rev-parse HEAD)"
+          fi
+
+          RELEASE_ID="$(gh api repos/Jerit3787/planner-release/releases/tags/$TAG --jq .id)"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+
   release:
+    needs: create-release
     if: ${{ inputs.desktop }}
     strategy:
       fail-fast: false
@@ -129,6 +185,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # macOS/Windows code signing intentionally NOT wired yet (unsigned build).
         with:
+          releaseId: ${{ needs.create-release.outputs.release_id }} # upload to the release create-release already made, don't race creating a new one per matrix job
           args: ${{ matrix.args }}
           tagName: v__VERSION__ # tauri-action replaces __VERSION__ with planner's app version
           releaseName: 'Student Planner v__VERSION__'
@@ -155,22 +212,28 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ./src-tauri/macos-widget/embed-widget.sh
-          TAG="v$(node -p "require('./package.json').version")"
+          TAG="v$(node -p "require('./src-tauri/tauri.conf.json').version")" # match tauri-action's own tag source, not package.json (see create-release job's comment)
           DMG_PATH=$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' | head -1)
           echo "Uploading rebuilt DMG: $DMG_PATH"
           gh release upload "$TAG" "$DMG_PATH" --repo Jerit3787/planner-release --clobber
 
-  # Builds the Android APK and attaches it to the same release the desktop job
-  # created above. NOTE: without a release keystore this produces a DEBUG-signed
-  # APK — installable by sideloading, but it can't auto-update over itself (CI's
+  # Builds the Android APK and attaches it to the release create-release made
+  # above. Deliberately depends on create-release, NOT on the desktop `release`
+  # matrix job — this is what makes android build AT THE SAME TIME as desktop
+  # instead of queueing behind all 5 desktop platforms (previously `needs:
+  # release`, serializing the two). Tradeoff: unlike before, a desktop platform
+  # failing no longer blocks Android from still uploading its APK to the same
+  # release — acceptable since fail-fast is already off for the desktop matrix
+  # itself (a failed platform there doesn't stop its siblings either), and a
+  # missing platform asset is already expected to be repaired by re-running
+  # just that job (see the matrix's own comment above).
+  # NOTE: without a release keystore this produces a DEBUG-signed APK —
+  # installable by sideloading, but it can't auto-update over itself (CI's
   # debug key differs per build, so Android rejects the update). Add an
   # ANDROID_KEYSTORE_BASE64 (+ passwords) secret and wire release signing to make
   # the in-app updater actually work; until then this is a downloadable preview.
   android:
-    needs: release
-    # Runs after the desktop release, or on its own when `desktop` is unchecked
-    # (release skipped) — but not if the desktop build actually failed.
-    if: ${{ always() && needs.release.result != 'failure' && needs.release.result != 'cancelled' }}
+    needs: create-release
     runs-on: ubuntu-latest
     env:
       NDK_VERSION: '26.3.11579264'
@@ -325,7 +388,8 @@ jobs:
         id: apk
         run: |
           VERSION="$(node -p "require('./package.json').version")"
-          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          TAG="v$(node -p "require('./src-tauri/tauri.conf.json').version")" # match tauri-action's own tag source, not package.json (see create-release job's comment)
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           SUFFIX="$([ "${{ steps.signing.outputs.signed }}" = "true" ] && echo release || echo debug)"
           mkdir -p android-out
           i=0
@@ -359,7 +423,7 @@ jobs:
 
       - name: Resolve version tag
         id: v
-        run: echo "tag=v$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+        run: echo "tag=v$(jq -r .version src-tauri/tauri.conf.json)" >> "$GITHUB_OUTPUT" # match tauri-action's own tag source, not package.json (see create-release job's comment)
 
       - name: Download the release's assets (to hash them)
         env:
@@ -373,7 +437,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VER="$(jq -r .version package.json)"
+          VER="$(jq -r .version src-tauri/tauri.conf.json)" # match tauri-action's own tag source, not package.json (see create-release job's comment)
           python3 src-tauri/scripts/gen-release-notes.py \
             "$VER" rel-assets Jerit3787/planner-release > body.md
           echo "----- generated body -----"; cat body.md
