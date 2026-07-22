@@ -78,11 +78,17 @@ jobs:
             echo "Release $TAG already exists — reusing it (desktop unchecked, or a repair re-run)."
           else
             echo "Release $TAG doesn't exist yet — creating it so desktop + android can upload in parallel."
+            # No --target: the checked-out HEAD here is planner's (the private
+            # source repo), not a valid commitish in planner-release (the repo
+            # this release actually belongs to) — passing it made GitHub
+            # reject the request outright ("Release.target_commitish is
+            # invalid"). Omitting it defaults to planner-release's own default
+            # branch, which is fine: the tag is just a version label here, no
+            # real source tree in planner-release needs to correspond to it.
             gh release create "$TAG" \
               --repo Jerit3787/planner-release \
               --title "Student Planner $TAG" \
-              --notes "Desktop build of Student Planner. Download the installer for your platform below; installed copies auto-update from future releases." \
-              --target "$(git rev-parse HEAD)"
+              --notes "Desktop build of Student Planner. Download the installer for your platform below; installed copies auto-update from future releases."
           fi
 
           RELEASE_ID="$(gh api repos/Jerit3787/planner-release/releases/tags/$TAG --jq .id)"
