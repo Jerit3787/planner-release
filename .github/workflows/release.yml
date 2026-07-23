@@ -25,7 +25,7 @@ on:
         default: dev
         required: true
       desktop:
-        description: 'Build the desktop installers (uncheck to re-run Android only against the existing release)'
+        description: 'Build the desktop installers (uncheck to re-run the Android AAB build only)'
         type: boolean
         default: true
 
@@ -223,21 +223,17 @@ jobs:
           echo "Uploading rebuilt DMG: $DMG_PATH"
           gh release upload "$TAG" "$DMG_PATH" --repo Jerit3787/planner-release --clobber
 
-  # Builds the Android APK and attaches it to the release create-release made
-  # above. Deliberately depends on create-release, NOT on the desktop `release`
-  # matrix job — this is what makes android build AT THE SAME TIME as desktop
-  # instead of queueing behind all 5 desktop platforms (previously `needs:
-  # release`, serializing the two). Tradeoff: unlike before, a desktop platform
-  # failing no longer blocks Android from still uploading its APK to the same
-  # release — acceptable since fail-fast is already off for the desktop matrix
-  # itself (a failed platform there doesn't stop its siblings either), and a
-  # missing platform asset is already expected to be repaired by re-running
-  # just that job (see the matrix's own comment above).
-  # NOTE: without a release keystore this produces a DEBUG-signed APK —
-  # installable by sideloading, but it can't auto-update over itself (CI's
-  # debug key differs per build, so Android rejects the update). Add an
-  # ANDROID_KEYSTORE_BASE64 (+ passwords) secret and wire release signing to make
-  # the in-app updater actually work; until then this is a downloadable preview.
+  # Builds a signed Android App Bundle (.aab) for Google Play — Play requires
+  # this format, not an APK. Deliberately depends only on create-release, NOT
+  # on the desktop `release` matrix job, so Android keeps building at the same
+  # time as desktop instead of queueing behind all 5 desktop platforms.
+  # Uploaded as a workflow artifact (see the last step below), not attached to
+  # the GitHub release — Play doesn't consume GitHub release assets, and there
+  # is no more GitHub-distributed Android download at all (Play is the only
+  # Android distribution channel now; the previous self-updating APK build
+  # this job used to produce has been retired). A manual upload to Play
+  # Console is expected until a Play Developer API auto-upload step is added
+  # separately.
   android:
     needs: create-release
     runs-on: ubuntu-latest
@@ -330,19 +326,17 @@ jobs:
             src-tauri/gen/android/build.gradle.kts \
             src-tauri/gen/android/app/build.gradle.kts
 
-      # Adds REQUEST_INSTALL_PACKAGES (needed for the in-app updater to launch the
-      # system installer on the downloaded APK), patches MainActivity.kt so the
-      # status bar/nav bar don't render over app content (planner issue #242 —
-      # Tauri's own template calls enableEdgeToEdge() at targetSdk 36, which
-      # makes edge-to-edge mandatory with no manifest opt-out; confirmed live
-      # that without this, system bar icons and the 3-button nav bar sat
-      # directly on top of the topbar and the FAB/bottom buttons), and, when
-      # the keystore secret is present, wires real release signing into the
-      # generated Gradle project so updates can install over each other
-      # (debug-signed APKs can't — the key differs per build). Falls back to
-      # a debug build when no keystore is set.
-      - name: Configure the Android project (install permission + insets + signing)
-        id: signing
+      # Patches MainActivity.kt so the status bar/nav bar don't render over app
+      # content (planner issue #242 — Tauri's own template calls
+      # enableEdgeToEdge() at targetSdk 36, which makes edge-to-edge mandatory
+      # with no manifest opt-out), and wires real release signing into the
+      # generated Gradle project. Deliberately does NOT inject
+      # REQUEST_INSTALL_PACKAGES (unlike this job's previous GitHub-APK
+      # incarnation) — this is now a Play-only build, and Play prohibits an
+      # app from updating itself via any mechanism other than Play's own.
+      # Fails outright if the keystore secret is missing — Play requires a
+      # signed .aab, so there's no debug fallback here.
+      - name: Configure the Android project (insets + signing, no install permission)
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -351,23 +345,14 @@ jobs:
         run: |
           set -euo pipefail
           GEN=src-tauri/gen/android
-          MANIFEST="$GEN/app/src/main/AndroidManifest.xml"
           IDENTIFIER="$(node -p "require('./src-tauri/tauri.conf.json').identifier")"
           MAIN_ACTIVITY="$GEN/app/src/main/java/$(echo "$IDENTIFIER" | tr '.' '/')/MainActivity.kt"
 
-          # 1) install permission (idempotent) so the updater can launch the installer
-          if ! grep -q 'REQUEST_INSTALL_PACKAGES' "$MANIFEST"; then
-            perl -0pi -e 's/(<manifest[^>]*>)/$1\n    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" \/>/' "$MANIFEST"
-          fi
-
-          # 2) system-bar insets (idempotent — see patch-android-insets.py)
           python3 src-tauri/scripts/patch-android-insets.py "$MAIN_ACTIVITY"
 
-          # 3) release signing — only if the keystore secret is provided
           if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
-            echo "No ANDROID_KEYSTORE_BASE64 secret — building a DEBUG apk."
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error::ANDROID_KEYSTORE_BASE64 is required — Play requires a signed .aab, there is no debug fallback here."
+            exit 1
           fi
 
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$GEN/release.jks"
@@ -380,44 +365,31 @@ jobs:
 
           python3 src-tauri/scripts/patch-android-signing.py "$GEN/app/build.gradle.kts"
           echo "Release signing configured."
-          echo "signed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Build the Android APK
-        run: |
-          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
-            npm run tauri android build -- --apk
-          else
-            npm run tauri android build -- --apk --debug
-          fi
+      - name: Build the Android App Bundle
+        run: npm run tauri android build -- --aab
 
-      - name: Collect and rename the APK(s)
-        id: apk
+      - name: Collect the AAB
+        id: aab
         run: |
           VERSION="$(node -p "require('./package.json').version")"
-          TAG="v$(node -p "require('./src-tauri/tauri.conf.json').version")" # match tauri-action's own tag source, not package.json (see create-release job's comment)
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          SUFFIX="$([ "${{ steps.signing.outputs.signed }}" = "true" ] && echo release || echo debug)"
-          mkdir -p android-out
-          i=0
-          while IFS= read -r f; do
-            arch="$(basename "$(dirname "$(dirname "$f")")")"   # .../apk/<arch>/<buildtype>/x.apk
-            cp "$f" "android-out/student-planner_${VERSION}_${arch:-android}-${SUFFIX}.apk"
-            i=$((i+1))
-          done < <(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk')
-          echo "count=$i"
-          ls -la android-out
+          mkdir -p android-play-out
+          find src-tauri/gen/android/app/build/outputs/bundle -name '*.aab' \
+            -exec cp {} "android-play-out/student-planner_${VERSION}.aab" \;
+          ls -la android-play-out
 
-      - name: Attach the APK(s) to the release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ steps.apk.outputs.tag }}" android-out/*.apk --repo Jerit3787/planner-release --clobber
+      - name: Upload the AAB as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-play-aab
+          path: android-play-out/*.aab
+          if-no-files-found: error
 
   # Once every asset (desktop + Android) is on the release, rewrite the release
   # notes with a curated download table + SHA-256 checksums so users can verify
   # their download. Runs after Android (the last asset-producing job).
   finalize:
-    needs: [release, android]
-    if: ${{ always() && needs.android.result == 'success' }}
+    needs: [release]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout the private planner code
