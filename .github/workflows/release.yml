@@ -385,9 +385,11 @@ jobs:
           path: android-play-out/*.aab
           if-no-files-found: error
 
-  # Once every asset (desktop + Android) is on the release, rewrite the release
-  # notes with a curated download table + SHA-256 checksums so users can verify
-  # their download. Runs after Android (the last asset-producing job).
+  # Once every desktop asset is on the release, rewrite the release notes with
+  # a curated download table + SHA-256 checksums so users can verify their
+  # download. Android no longer contributes a release asset (it's a signed
+  # .aab workflow artifact for Play Console now, not a GitHub release asset),
+  # so this only waits on the desktop matrix.
   finalize:
     needs: [release]
     runs-on: ubuntu-latest
