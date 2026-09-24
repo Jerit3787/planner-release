@@ -59,10 +59,34 @@ See the [full system requirements page](https://docs.planner.danplace.tech/getti
 <details>
 <summary><b>For maintainers</b></summary>
 
-The app source lives in the private `planner` repo. Releases here are built by
-`.github/workflows/release.yml` (run it from the **Actions** tab; it checks out the private
-code via `PLANNER_PAT`, builds every platform, signs them, and publishes here). The public
-download UI lives in the planner site itself (`src/index.html`, the `#download` section), which
-reads this repo's latest release via the GitHub API — there's no separate site to maintain.
+The app source lives in the private `planner` repo. The existing
+`.github/workflows/release.yml` remains the manually dispatched legacy Tauri
+release lane. The separate `.github/workflows/testflight.yml` workflow is a
+`workflow_dispatch` Flutter iOS/iPadOS + macOS lane: private `planner` dispatches
+the exact source commit only after all five required `Tests` checks pass on
+`dev`, and `verify-source` validates the matching completed run before
+`build-upload` receives the `testflight` environment.
+
+For the TestFlight lane, configure `PLANNER_PAT` as a repository secret with
+`Contents:read` and `Actions:read` on private `planner`. The private repository
+uses `RELEASE_DISPATCH_PAT` with `Actions:write` on this public repository. The
+`testflight` environment must be restricted to the default branch `main`, have
+no required reviewer for automatic dev updates, and contain these six secrets:
+`TESTFLIGHT_APPLE_ID`, `TESTFLIGHT_APP_SPECIFIC_PASSWORD`,
+`TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64`,
+`TESTFLIGHT_CERTIFICATE_PASSWORD`, `TESTFLIGHT_IOS_PROFILE_BASE64`, and
+`TESTFLIGHT_MACOS_PROFILE_BASE64`. It also needs the non-secret production
+variables `POWERSYNC_URL`, `WORKER_URL`, and `GOOGLE_WEB_CLIENT_ID`; the build
+sets `PLANNER_ENV=prod`. Never use development service endpoints for a release.
+
+An Apple CLI upload being accepted means **accepted for processing**, not that
+the build has completed processing or reached the PE Personal internal group.
+Verify both platform results independently; a one-platform upload is a partial
+failure requiring follow-up. Build packages are uploaded directly to App Store
+Connect and are not retained as GitHub artifacts.
+
+The public download UI lives in the planner site itself (`src/index.html`, the
+`#download` section), which reads this repo's latest release via the GitHub API
+— there's no separate site to maintain.
 
 </details>
