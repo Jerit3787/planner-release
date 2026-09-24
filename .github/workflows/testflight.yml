@@ -1,0 +1,535 @@
+name: TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Private planner branch that passed the source release gate'
+        required: true
+        type: string
+      source_sha:
+        description: 'Exact private planner commit tested by the source run'
+        required: true
+        type: string
+      source_run_id:
+        description: 'Private planner workflow run ID'
+        required: true
+        type: string
+      source_run_attempt:
+        description: 'Private planner workflow run attempt'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-source:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the public release repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Validate source dispatch inputs
+        id: source-inputs
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+        run: |
+          set -euo pipefail
+
+          fail() {
+            echo '::error::TestFlight source inputs are invalid.'
+            exit 1
+          }
+
+          [[ "$SOURCE_REF" == 'dev' ]] || fail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || fail
+          [[ "$SOURCE_RUN_ATTEMPT" =~ ^([1-9]|[1-4][0-9]|5[01])$ ]] || fail
+
+          {
+            echo "source_ref=$SOURCE_REF"
+            echo "source_sha=$SOURCE_SHA"
+            echo "source_run_id=$SOURCE_RUN_ID"
+            echo "source_run_attempt=$SOURCE_RUN_ATTEMPT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify the exact private source run and required checks
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PLANNER_PAT }}
+          GH_HTTP_TIMEOUT: '30'
+          SOURCE_REF: ${{ steps.source-inputs.outputs.source_ref }}
+          SOURCE_SHA: ${{ steps.source-inputs.outputs.source_sha }}
+          SOURCE_RUN_ID: ${{ steps.source-inputs.outputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ steps.source-inputs.outputs.source_run_attempt }}
+        run: |
+          set -euo pipefail
+
+          fail() {
+            echo '::error::The private source run could not be verified for TestFlight publishing.'
+            exit 1
+          }
+
+          SOURCE_DIR="$RUNNER_TEMP/testflight-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -m 700 -p "$SOURCE_DIR"
+          trap 'rm -rf "$SOURCE_DIR"' EXIT
+
+          deadline=$((SECONDS + 600))
+          status=''
+          while (( SECONDS < deadline )); do
+            if ! gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/Jerit3787/planner/actions/runs/$SOURCE_RUN_ID" \
+              > "$SOURCE_DIR/source-run.json" 2>/dev/null; then
+              fail
+            fi
+
+            status="$(jq -er '.status | strings' "$SOURCE_DIR/source-run.json" 2>/dev/null)" || fail
+            [[ "$status" == 'completed' ]] && break
+
+            remaining=$((deadline - SECONDS))
+            (( remaining > 0 )) || break
+            sleep_for=15
+            (( remaining < sleep_for )) && sleep_for=$remaining
+            sleep "$sleep_for"
+          done
+
+          [[ "$status" == 'completed' ]] || fail
+
+          if ! gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/Jerit3787/planner/actions/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$SOURCE_DIR/source-jobs.json" 2>/dev/null; then
+            fail
+          fi
+
+          if ! node scripts/testflight/validate-source-run.mjs \
+            "$SOURCE_DIR/source-run.json" \
+            "$SOURCE_DIR/source-jobs.json" \
+            "$SOURCE_REF" "$SOURCE_SHA" "$SOURCE_RUN_ID" "$SOURCE_RUN_ATTEMPT"; then
+            fail
+          fi
+
+  build-upload:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    needs: verify-source
+    runs-on: macos-26-intel
+    environment: testflight
+    steps:
+      - name: Checkout the public release repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout the tested private planner revision
+        uses: actions/checkout@v7
+        with:
+          repository: Jerit3787/planner
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.PLANNER_PAT }}
+          path: planner
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Set up Flutter 3.47.4
+        uses: subosito/flutter-action@v2.22.0
+        with:
+          channel: stable
+          flutter-version: '3.47.4'
+          cache: false
+
+      - name: Check Xcode and App Store uploader support
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcode_version="$(xcodebuild -version | awk '/^Xcode / { print $2; exit }')"
+          xcode_major="${xcode_version%%.*}"
+          [[ "$xcode_major" =~ ^[0-9]+$ ]] && (( xcode_major >= 26 )) || {
+            echo '::error::TestFlight builds require Xcode 26 or later.'
+            exit 1
+          }
+
+          help_file="$RUNNER_TEMP/testflight-altool-help.txt"
+          if ! xcrun altool --help > "$help_file" 2>&1; then
+            echo '::error::The selected Xcode image does not provide altool.'
+            exit 1
+          fi
+          grep -Fq -- '--upload-app' "$help_file" || {
+            echo '::error::The selected Xcode image does not support altool app uploads.'
+            exit 1
+          }
+
+      - name: Resolve app version and TestFlight build number
+        id: build-metadata
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          BUILD_NUMBER="$(node scripts/testflight/build-number.mjs "$GITHUB_RUN_NUMBER" "$GITHUB_RUN_ATTEMPT")"
+          APP_VERSION="$(awk '$1 == "version:" { print $2; exit }' planner/app/pubspec.yaml)"
+          APP_VERSION="${APP_VERSION%%+*}"
+          [[ "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+){2}([+-][0-9A-Za-z.-]+)?$ ]] || {
+            echo '::error::The private app version is not a supported version string.'
+            exit 1
+          }
+
+          {
+            echo "build_number=$BUILD_NUMBER"
+            echo "app_version=$APP_VERSION"
+            echo "source_sha=$SOURCE_SHA"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate all TestFlight environment inputs
+        shell: bash
+        env:
+          TESTFLIGHT_APPLE_ID: ${{ secrets.TESTFLIGHT_APPLE_ID }}
+          TESTFLIGHT_APP_SPECIFIC_PASSWORD: ${{ secrets.TESTFLIGHT_APP_SPECIFIC_PASSWORD }}
+          TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64: ${{ secrets.TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64 }}
+          TESTFLIGHT_CERTIFICATE_PASSWORD: ${{ secrets.TESTFLIGHT_CERTIFICATE_PASSWORD }}
+          TESTFLIGHT_IOS_PROFILE_BASE64: ${{ secrets.TESTFLIGHT_IOS_PROFILE_BASE64 }}
+          TESTFLIGHT_MACOS_PROFILE_BASE64: ${{ secrets.TESTFLIGHT_MACOS_PROFILE_BASE64 }}
+          POWERSYNC_URL: ${{ vars.POWERSYNC_URL }}
+          WORKER_URL: ${{ vars.WORKER_URL }}
+          GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          set +x
+
+          if [[ -z "$TESTFLIGHT_APPLE_ID" || \
+                -z "$TESTFLIGHT_APP_SPECIFIC_PASSWORD" || \
+                -z "$TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64" || \
+                -z "$TESTFLIGHT_CERTIFICATE_PASSWORD" || \
+                -z "$TESTFLIGHT_IOS_PROFILE_BASE64" || \
+                -z "$TESTFLIGHT_MACOS_PROFILE_BASE64" || \
+                -z "$POWERSYNC_URL" || \
+                -z "$WORKER_URL" || \
+                -z "$GOOGLE_WEB_CLIENT_ID" ]]; then
+            echo '::error::One or more required TestFlight environment inputs are missing.'
+            exit 1
+          fi
+
+      - name: Install temporary Apple signing credentials
+        shell: bash
+        env:
+          TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64: ${{ secrets.TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64 }}
+          TESTFLIGHT_CERTIFICATE_PASSWORD: ${{ secrets.TESTFLIGHT_CERTIFICATE_PASSWORD }}
+          TESTFLIGHT_IOS_PROFILE_BASE64: ${{ secrets.TESTFLIGHT_IOS_PROFILE_BASE64 }}
+          TESTFLIGHT_MACOS_PROFILE_BASE64: ${{ secrets.TESTFLIGHT_MACOS_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+
+          if [[ -z "$TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64" || \
+                -z "$TESTFLIGHT_CERTIFICATE_PASSWORD" || \
+                -z "$TESTFLIGHT_IOS_PROFILE_BASE64" || \
+                -z "$TESTFLIGHT_MACOS_PROFILE_BASE64" ]]; then
+            echo '::error::One or more required Apple signing secrets are missing.'
+            exit 1
+          fi
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/testflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.keychain-db"
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -m 700 -p "$PROFILE_DIR"
+          printf '%s\n' "$KEYCHAIN_PATH" > "$RUNNER_TEMP/testflight-keychain-path.txt"
+          security list-keychains -d user > "$RUNNER_TEMP/testflight-original-keychains.txt"
+          security default-keychain -d user > "$RUNNER_TEMP/testflight-original-default-keychain.txt"
+
+          CERTIFICATE_PATH="$RUNNER_TEMP/testflight-distribution.p12"
+          IOS_PROFILE_PATH="$RUNNER_TEMP/testflight-ios.mobileprovision"
+          MACOS_PROFILE_PATH="$RUNNER_TEMP/testflight-macos.mobileprovision"
+          printf '%s' "$TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64" | base64 -D > "$CERTIFICATE_PATH"
+          printf '%s' "$TESTFLIGHT_IOS_PROFILE_BASE64" | base64 -D > "$IOS_PROFILE_PATH"
+          printf '%s' "$TESTFLIGHT_MACOS_PROFILE_BASE64" | base64 -D > "$MACOS_PROFILE_PATH"
+
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # security import has no stdin/environment passphrase input for unattended PKCS#12 import.
+          # Keep its required -P argument confined to this no-tracing step on the ephemeral runner.
+          security import "$CERTIFICATE_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$TESTFLIGHT_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security >/dev/null
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH" >/dev/null
+
+          keychains=("$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db" /Library/Keychains/System.keychain)
+          security list-keychains -d user -s "${keychains[@]}" >/dev/null
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+
+          install_profile() {
+            profile_path="$1"
+            metadata_path="$2"
+            uuid_path="$3"
+            security cms -D -i "$profile_path" -o "$metadata_path"
+            profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$metadata_path" 2>/dev/null)"
+            [[ "$profile_uuid" =~ ^[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}$ ]] || {
+              echo '::error::An Apple provisioning profile is invalid.'
+              exit 1
+            }
+            profile_destination="$PROFILE_DIR/$profile_uuid.mobileprovision"
+            [[ ! -e "$profile_destination" ]] || {
+              echo '::error::An Apple provisioning profile UUID is already installed.'
+              exit 1
+            }
+            printf '%s\n' "$profile_uuid" > "$uuid_path"
+            cp "$profile_path" "$profile_destination"
+          }
+
+          install_profile \
+            "$IOS_PROFILE_PATH" \
+            "$RUNNER_TEMP/testflight-ios-profile.plist" \
+            "$RUNNER_TEMP/testflight-ios-profile-uuid.txt"
+          install_profile \
+            "$MACOS_PROFILE_PATH" \
+            "$RUNNER_TEMP/testflight-macos-profile.plist" \
+            "$RUNNER_TEMP/testflight-macos-profile-uuid.txt"
+
+      - name: Install Flutter dependencies
+        working-directory: planner/app
+        shell: bash
+        run: flutter pub get
+
+      - name: Build the iOS/iPadOS TestFlight IPA
+        working-directory: planner/app
+        shell: bash
+        env:
+          BUILD_NUMBER: ${{ steps.build-metadata.outputs.build_number }}
+          POWERSYNC_URL: ${{ vars.POWERSYNC_URL }}
+          WORKER_URL: ${{ vars.WORKER_URL }}
+          GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          flutter build ipa \
+            --release \
+            --build-number "$BUILD_NUMBER" \
+            --dart-define=PLANNER_ENV=prod \
+            --dart-define="POWERSYNC_URL=$POWERSYNC_URL" \
+            --dart-define="WORKER_URL=$WORKER_URL" \
+            --dart-define="GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID" \
+            --export-options-plist=ios/ExportOptions.testflight.plist
+
+      - name: Archive and export the macOS TestFlight package
+        working-directory: planner/app
+        shell: bash
+        env:
+          BUILD_NUMBER: ${{ steps.build-metadata.outputs.build_number }}
+          APP_VERSION: ${{ steps.build-metadata.outputs.app_version }}
+          POWERSYNC_URL: ${{ vars.POWERSYNC_URL }}
+          WORKER_URL: ${{ vars.WORKER_URL }}
+          GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          encode_define() {
+            printf '%s' "$1" | base64 | tr -d '\r\n'
+          }
+          DART_DEFINES="$(encode_define 'PLANNER_ENV=prod'),$(encode_define "POWERSYNC_URL=$POWERSYNC_URL"),$(encode_define "WORKER_URL=$WORKER_URL"),$(encode_define "GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID")"
+
+          xcodebuild \
+            -workspace macos/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -archivePath "$RUNNER_TEMP/StutasticPlanner.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/testflight-derived-data" \
+            FLUTTER_BUILD_NAME="$APP_VERSION" \
+            FLUTTER_BUILD_NUMBER="$BUILD_NUMBER" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            DART_DEFINES="$DART_DEFINES" \
+            archive
+
+          xcodebuild \
+            -exportArchive \
+            -archivePath "$RUNNER_TEMP/StutasticPlanner.xcarchive" \
+            -exportOptionsPlist "$GITHUB_WORKSPACE/planner/app/macos/ExportOptions.testflight.plist" \
+            -exportPath "$RUNNER_TEMP/macos-export"
+
+      - name: Locate the iOS/iPadOS IPA and macOS package
+        id: artifacts
+        working-directory: planner/app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ipas=()
+          while IFS= read -r file; do
+            ipas+=("$file")
+          done < <(find build/ios/ipa -maxdepth 1 -type f -name '*.ipa' -print)
+
+          packages=()
+          while IFS= read -r file; do
+            packages+=("$file")
+          done < <(find "$RUNNER_TEMP/macos-export" -maxdepth 1 -type f -name '*.pkg' -print)
+
+          if (( ${#ipas[@]} != 1 || ${#packages[@]} != 1 )); then
+            echo '::error::Expected exactly one IPA and one macOS package; no upload was attempted.'
+            exit 1
+          fi
+
+          {
+            echo "ipa=$GITHUB_WORKSPACE/planner/app/${ipas[0]}"
+            echo "macos_pkg=${packages[0]}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload iOS/iPadOS and macOS to TestFlight
+        id: uploads
+        shell: bash
+        env:
+          TESTFLIGHT_APPLE_ID: ${{ secrets.TESTFLIGHT_APPLE_ID }}
+          TESTFLIGHT_APP_SPECIFIC_PASSWORD: ${{ secrets.TESTFLIGHT_APP_SPECIFIC_PASSWORD }}
+          IOS_IPA: ${{ steps.artifacts.outputs.ipa }}
+          MACOS_PKG: ${{ steps.artifacts.outputs.macos_pkg }}
+          APP_VERSION: ${{ steps.build-metadata.outputs.app_version }}
+          BUILD_NUMBER: ${{ steps.build-metadata.outputs.build_number }}
+          SOURCE_SHA: ${{ steps.build-metadata.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          set +x
+
+          if [[ -z "$TESTFLIGHT_APPLE_ID" || -z "$TESTFLIGHT_APP_SPECIFIC_PASSWORD" ]]; then
+            echo '::error::One or more required App Store Connect credentials are missing.'
+            exit 1
+          fi
+
+          IOS_UPLOAD_STATUS='failed'
+          MACOS_UPLOAD_STATUS='failed'
+
+          if xcrun altool --upload-app \
+            -f "$IOS_IPA" \
+            -t ios \
+            -u "$TESTFLIGHT_APPLE_ID" \
+            -p @env:TESTFLIGHT_APP_SPECIFIC_PASSWORD \
+            --output-format json \
+            > "$RUNNER_TEMP/ios-upload.log" 2>&1; then
+            IOS_UPLOAD_STATUS='accepted for processing'
+          else
+            echo '::error::The iOS/iPadOS upload failed; Apple response details were suppressed.'
+          fi
+
+          if xcrun altool --upload-app \
+            -f "$MACOS_PKG" \
+            -t macos \
+            -u "$TESTFLIGHT_APPLE_ID" \
+            -p @env:TESTFLIGHT_APP_SPECIFIC_PASSWORD \
+            --output-format json \
+            > "$RUNNER_TEMP/macos-upload.log" 2>&1; then
+            MACOS_UPLOAD_STATUS='accepted for processing'
+          else
+            echo '::error::The macOS upload failed; Apple response details were suppressed.'
+          fi
+
+          {
+            echo "iOS/iPadOS upload result: $IOS_UPLOAD_STATUS"
+            echo "macOS upload result: $MACOS_UPLOAD_STATUS"
+            echo "ios_upload_status=$IOS_UPLOAD_STATUS" >> "$GITHUB_OUTPUT"
+            echo "macos_upload_status=$MACOS_UPLOAD_STATUS" >> "$GITHUB_OUTPUT"
+          }
+
+          {
+            echo '## TestFlight upload results'
+            echo
+            echo "- Source SHA: \`$SOURCE_SHA\`"
+            echo "- App version: \`$APP_VERSION\`"
+            echo "- Shared build number: \`$BUILD_NUMBER\`"
+            echo "- iOS/iPadOS: **$IOS_UPLOAD_STATUS**"
+            echo "- macOS: **$MACOS_UPLOAD_STATUS**"
+            echo
+            echo 'Upload acceptance is not the same as completed Apple processing or PE Personal availability.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$IOS_UPLOAD_STATUS" != 'accepted for processing' || \
+                "$MACOS_UPLOAD_STATUS" != 'accepted for processing' ]]; then
+            exit 1
+          fi
+
+      - name: Remove temporary signing material and build output
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          for uuid_file in \
+            "$RUNNER_TEMP/testflight-ios-profile-uuid.txt" \
+            "$RUNNER_TEMP/testflight-macos-profile-uuid.txt"; do
+            [[ -f "$uuid_file" ]] || continue
+            profile_uuid=''
+            IFS= read -r profile_uuid < "$uuid_file"
+            if [[ "$profile_uuid" =~ ^[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}$ ]]; then
+              /bin/rm -f "$PROFILE_DIR/$profile_uuid.mobileprovision"
+            fi
+          done
+
+          if [[ -f "$RUNNER_TEMP/testflight-original-keychains.txt" ]]; then
+            original_keychains=()
+            while IFS= read -r keychain; do
+              keychain="${keychain#\"}"
+              keychain="${keychain%\"}"
+              [[ -n "$keychain" ]] && original_keychains+=("$keychain")
+            done < "$RUNNER_TEMP/testflight-original-keychains.txt"
+            if (( ${#original_keychains[@]} > 0 )); then
+              security list-keychains -d user -s "${original_keychains[@]}" >/dev/null 2>&1
+            fi
+          fi
+
+          if [[ -f "$RUNNER_TEMP/testflight-original-default-keychain.txt" ]]; then
+            original_default=''
+            IFS= read -r original_default < "$RUNNER_TEMP/testflight-original-default-keychain.txt"
+            original_default="${original_default#\"}"
+            original_default="${original_default%\"}"
+            [[ -n "$original_default" ]] && security default-keychain -d user -s "$original_default" >/dev/null 2>&1
+          fi
+
+          if [[ -f "$RUNNER_TEMP/testflight-keychain-path.txt" ]]; then
+            keychain_path=''
+            IFS= read -r keychain_path < "$RUNNER_TEMP/testflight-keychain-path.txt"
+            if [[ "$keychain_path" == "$RUNNER_TEMP/testflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.keychain-db" ]]; then
+              security delete-keychain "$keychain_path" >/dev/null 2>&1
+            fi
+          fi
+
+          /bin/rm -f \
+            "$RUNNER_TEMP/testflight-keychain-path.txt" \
+            "$RUNNER_TEMP/testflight-original-keychains.txt" \
+            "$RUNNER_TEMP/testflight-original-default-keychain.txt" \
+            "$RUNNER_TEMP/testflight-distribution.p12" \
+            "$RUNNER_TEMP/testflight-ios.mobileprovision" \
+            "$RUNNER_TEMP/testflight-macos.mobileprovision" \
+            "$RUNNER_TEMP/testflight-ios-profile.plist" \
+            "$RUNNER_TEMP/testflight-macos-profile.plist" \
+            "$RUNNER_TEMP/testflight-ios-profile-uuid.txt" \
+            "$RUNNER_TEMP/testflight-macos-profile-uuid.txt" \
+            "$RUNNER_TEMP/testflight-altool-help.txt" \
+            "$RUNNER_TEMP/ios-upload.log" \
+            "$RUNNER_TEMP/macos-upload.log"
+          /bin/rm -rf \
+            "$RUNNER_TEMP/StutasticPlanner.xcarchive" \
+            "$RUNNER_TEMP/macos-export" \
+            "$RUNNER_TEMP/testflight-derived-data" \
+            "$GITHUB_WORKSPACE/planner/app/build"
