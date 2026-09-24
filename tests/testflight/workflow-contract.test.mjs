@@ -108,6 +108,8 @@ describe('TestFlight publishing workflow contract', () => {
       'TESTFLIGHT_APP_SPECIFIC_PASSWORD',
       'TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64',
       'TESTFLIGHT_CERTIFICATE_PASSWORD',
+      'TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64',
+      'TESTFLIGHT_INSTALLER_CERTIFICATE_PASSWORD',
       'TESTFLIGHT_IOS_PROFILE_BASE64',
       'TESTFLIGHT_MACOS_PROFILE_BASE64',
     ]) {
@@ -131,6 +133,8 @@ describe('TestFlight publishing workflow contract', () => {
       'TESTFLIGHT_APP_SPECIFIC_PASSWORD',
       'TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64',
       'TESTFLIGHT_CERTIFICATE_PASSWORD',
+      'TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64',
+      'TESTFLIGHT_INSTALLER_CERTIFICATE_PASSWORD',
       'TESTFLIGHT_IOS_PROFILE_BASE64',
       'TESTFLIGHT_MACOS_PROFILE_BASE64',
     ]) {
@@ -142,6 +146,24 @@ describe('TestFlight publishing workflow contract', () => {
       assert.match(preflight, new RegExp(`${value}: \\$\\{\\{ vars\\.${value} \\}\\}`));
       assert.match(preflight, new RegExp(`-z "\\$${value}"`));
     }
+  });
+
+  it('imports the separate macOS installer identity into the temporary keychain', () => {
+    const signingStart = buildUpload.indexOf(
+      'name: Install temporary Apple signing credentials',
+    );
+    const signingEnd = buildUpload.indexOf('\n      - name:', signingStart + 1);
+    assert.ok(signingStart >= 0 && signingEnd > signingStart);
+
+    const signingStep = buildUpload.slice(signingStart, signingEnd);
+    assert.match(signingStep, /TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64/);
+    assert.match(signingStep, /TESTFLIGHT_INSTALLER_CERTIFICATE_PASSWORD/);
+    assert.match(signingStep, /testflight-installer\.p12/);
+    assert.match(signingStep, /security import "\$INSTALLER_CERTIFICATE_PATH"/);
+    assert.match(
+      buildUpload,
+      /rm -f[\s\S]*"\$RUNNER_TEMP\/testflight-installer\.p12"/,
+    );
   });
 
   it('captures complete Xcode version output before parsing it', () => {

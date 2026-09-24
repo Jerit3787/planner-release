@@ -74,13 +74,19 @@ For the TestFlight lane, configure `PLANNER_PAT` as a repository secret with
 `Contents:read` and `Actions:read` on private `planner`. The private repository
 uses `RELEASE_DISPATCH_PAT` with `Actions:write` on this public repository. The
 `testflight` environment must be restricted to the default branch `main`, have
-no required reviewer for automatic dev updates, and contain these six secrets:
+no required reviewer for automatic dev updates, and contain these eight secrets:
 `TESTFLIGHT_APPLE_ID`, `TESTFLIGHT_APP_SPECIFIC_PASSWORD`,
 `TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64`,
-`TESTFLIGHT_CERTIFICATE_PASSWORD`, `TESTFLIGHT_IOS_PROFILE_BASE64`, and
+`TESTFLIGHT_CERTIFICATE_PASSWORD`,
+`TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64`,
+`TESTFLIGHT_INSTALLER_CERTIFICATE_PASSWORD`,
+`TESTFLIGHT_IOS_PROFILE_BASE64`, and
 `TESTFLIGHT_MACOS_PROFILE_BASE64`. It also needs the non-secret production
 variables `POWERSYNC_URL`, `WORKER_URL`, and `GOOGLE_WEB_CLIENT_ID`; the build
 sets `PLANNER_ENV=prod`. Never use development service endpoints for a release.
+The installer P12 is the `3rd Party Mac Developer Installer` identity pinned by
+`planner/app/macos/ExportOptions.testflight.plist`; it is separate from the app
+distribution identity used to sign the iOS/iPadOS and macOS apps.
 
 An Apple CLI upload being accepted means **accepted for processing**, not that
 the build has completed processing or reached the PE Personal internal group.
