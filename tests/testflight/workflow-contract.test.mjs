@@ -194,6 +194,35 @@ describe('TestFlight publishing workflow contract', () => {
     assert.match(macBuild, /DART_DEFINES="\$DART_DEFINES"/);
   });
 
+  it('generates production Flutter macOS archive configuration before Xcode archiving', () => {
+    const configStart = buildUpload.indexOf(
+      'name: Generate Flutter macOS archive configuration',
+    );
+    const archiveStart = buildUpload.indexOf(
+      'name: Archive and export the macOS TestFlight package',
+    );
+    const configEnd = buildUpload.indexOf('\n      - name:', configStart + 1);
+    assert.ok(configStart >= 0 && archiveStart > configStart);
+    assert.ok(configEnd > configStart && configEnd < archiveStart);
+
+    const configStep = buildUpload.slice(configStart, configEnd);
+    for (const requirement of [
+      /working-directory:\s*planner\/app/,
+      /flutter build macos/,
+      /--config-only/,
+      /--release/,
+      /--no-pub/,
+      /--build-name "\$APP_VERSION"/,
+      /--build-number "\$BUILD_NUMBER"/,
+      /--dart-define=PLANNER_ENV=prod/,
+      /--dart-define="POWERSYNC_URL=\$POWERSYNC_URL"/,
+      /--dart-define="WORKER_URL=\$WORKER_URL"/,
+      /--dart-define="GOOGLE_WEB_CLIENT_ID=\$GOOGLE_WEB_CLIENT_ID"/,
+    ]) {
+      assert.match(configStep, requirement);
+    }
+  });
+
   it('builds both tested Apple targets with one build number before uploading', () => {
     assert.match(buildUpload, /flutter-version:\s*['"]?3\.47\.4/);
     assert.match(buildUpload, /inputs\.source_sha/);
