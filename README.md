@@ -65,7 +65,10 @@ release lane. The separate `.github/workflows/testflight.yml` workflow is a
 `workflow_dispatch` Flutter iOS/iPadOS + macOS lane: private `planner` dispatches
 the exact source commit only after all five required `Tests` checks pass on
 `dev`, and `verify-source` validates the matching completed run before
-`build-upload` receives the `testflight` environment.
+`build-upload` receives the `testflight` environment. A separate Ubuntu job
+validates production iOS and macOS release policy for that exact revision
+(including macOS's approved `attested` posture) before the protected signing
+job starts.
 
 For the TestFlight lane, configure `PLANNER_PAT` as a repository secret with
 `Contents:read` and `Actions:read` on private `planner`. The private repository

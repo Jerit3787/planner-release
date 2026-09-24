@@ -123,9 +123,46 @@ jobs:
             fail
           fi
 
-  build-upload:
+  validate-production-policy:
     if: ${{ github.ref == 'refs/heads/main' }}
     needs: verify-source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the public release repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout the tested private planner revision
+        uses: actions/checkout@v7
+        with:
+          repository: Jerit3787/planner
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.PLANNER_PAT }}
+          path: planner
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Validate production release policies
+        working-directory: planner
+        shell: bash
+        env:
+          PLANNER_DESKTOP_POSTURE: attested
+        run: |
+          set -euo pipefail
+
+          node tools/release/release-policy.mjs --environment prod --target ios
+          node tools/release/release-policy.mjs --environment prod --target macos
+
+  build-upload:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    needs:
+      - verify-source
+      - validate-production-policy
     runs-on: macos-26-intel
     environment: testflight
     steps:
