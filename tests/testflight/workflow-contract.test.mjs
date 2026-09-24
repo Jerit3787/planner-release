@@ -1,0 +1,197 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { describe, it } from 'node:test';
+
+const publishingWorkflow = readFileSync('.github/workflows/testflight.yml', 'utf8');
+const validationWorkflow = readFileSync(
+  '.github/workflows/testflight-validation.yml',
+  'utf8',
+);
+
+function jobBlock(workflow, id) {
+  const start = workflow.search(new RegExp(`^  ${id}:\\n`, 'm'));
+  assert.notEqual(start, -1, `missing job ${id}`);
+
+  const remainder = workflow.slice(start);
+  const nextJob = remainder.slice(1).search(/^  [a-z0-9_-]+:\s*$/m);
+  return nextJob === -1 ? remainder : remainder.slice(0, nextJob + 1);
+}
+
+describe('TestFlight publishing workflow contract', () => {
+  const verifySource = jobBlock(publishingWorkflow, 'verify-source');
+  const buildUpload = jobBlock(publishingWorkflow, 'build-upload');
+
+  it('is dispatch-only with all four required source-run inputs', () => {
+    const trigger = publishingWorkflow.match(/^on:\n([\s\S]*?)^permissions:/m)?.[1];
+    assert.ok(trigger, 'workflow must declare triggers before permissions');
+    assert.match(trigger, /^  workflow_dispatch:\n    inputs:/m);
+    assert.doesNotMatch(trigger, /^  (?!workflow_dispatch:)[a-z_]+:/m);
+
+    for (const input of [
+      'source_ref',
+      'source_sha',
+      'source_run_id',
+      'source_run_attempt',
+    ]) {
+      assert.match(
+        trigger,
+        new RegExp(`^      ${input}:\\n        description:[^\\n]+\\n        required: true\\n        type: string$`, 'm'),
+      );
+    }
+
+    assert.match(publishingWorkflow, /^permissions:\n  contents: read$/m);
+    assert.match(verifySource, /if:\s*\$\{\{\s*github\.ref == 'refs\/heads\/main'\s*\}\}/);
+    assert.match(buildUpload, /if:\s*\$\{\{\s*github\.ref == 'refs\/heads\/main'\s*\}\}/);
+  });
+
+  it('validates the exact source run before the Apple environment can start', () => {
+    assert.match(verifySource, /runs-on:\s*ubuntu-latest/);
+    assert.match(buildUpload, /runs-on:\s*macos-26-intel/);
+    assert.match(buildUpload, /needs:\s*verify-source/);
+    assert.match(buildUpload, /environment:\s*testflight/);
+    assert.doesNotMatch(verifySource, /environment:\s*testflight/);
+    assert.doesNotMatch(verifySource, /TESTFLIGHT_[A-Z0-9_]+/);
+
+    for (const requirement of [
+      /checkout the public release repository/i,
+      /SECONDS\s*\+\s*600/,
+      /sleep_for=15/,
+      /repos\/Jerit3787\/planner\/actions\/runs\/\$SOURCE_RUN_ID/,
+      /attempts\/\$SOURCE_RUN_ATTEMPT\/jobs\?per_page=100/,
+      /validate-source-run\.mjs/,
+      /"\$SOURCE_REF"\s+"\$SOURCE_SHA"\s+"\$SOURCE_RUN_ID"\s+"\$SOURCE_RUN_ATTEMPT"/,
+      /SOURCE_REF.*== 'dev'/s,
+      /\[\[ "\$SOURCE_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/,
+      /\[\[ "\$SOURCE_RUN_ATTEMPT" =~ \^\(\[1-9\]\|\[1-4\]\[0-9\]\|5\[01\]\)\$ \]\]/,
+    ]) {
+      assert.match(verifySource, requirement);
+    }
+  });
+
+  it('limits the private PAT and Apple secrets to their intended steps', () => {
+    assert.match(verifySource, /GH_TOKEN:\s*\$\{\{\s*secrets\.PLANNER_PAT\s*\}\}/);
+    assert.match(buildUpload, /token:\s*\$\{\{\s*secrets\.PLANNER_PAT\s*\}\}/);
+    assert.equal(
+      [...publishingWorkflow.matchAll(/secrets\.PLANNER_PAT/g)].length,
+      2,
+      'the private PAT must only be used for source metadata and checkout',
+    );
+
+    for (const secret of [
+      'TESTFLIGHT_APPLE_ID',
+      'TESTFLIGHT_APP_SPECIFIC_PASSWORD',
+      'TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64',
+      'TESTFLIGHT_CERTIFICATE_PASSWORD',
+      'TESTFLIGHT_IOS_PROFILE_BASE64',
+      'TESTFLIGHT_MACOS_PROFILE_BASE64',
+    ]) {
+      assert.match(buildUpload, new RegExp(`secrets\\.${secret}`));
+      assert.doesNotMatch(verifySource, new RegExp(`secrets\\.${secret}`));
+    }
+
+    assert.doesNotMatch(publishingWorkflow, /id-token:\s*write|actions:\s*write/i);
+  });
+
+  it('checks all Apple secrets and production runtime variables before decoding signing material', () => {
+    const preflightStart = buildUpload.indexOf('name: Validate all TestFlight environment inputs');
+    const preflightEnd = buildUpload.indexOf('\n      - name:', preflightStart + 1);
+    const firstDecode = buildUpload.indexOf('base64 -D');
+    assert.ok(preflightStart >= 0 && preflightEnd > preflightStart);
+    assert.ok(firstDecode > preflightEnd);
+
+    const preflight = buildUpload.slice(preflightStart, preflightEnd);
+    for (const secret of [
+      'TESTFLIGHT_APPLE_ID',
+      'TESTFLIGHT_APP_SPECIFIC_PASSWORD',
+      'TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64',
+      'TESTFLIGHT_CERTIFICATE_PASSWORD',
+      'TESTFLIGHT_IOS_PROFILE_BASE64',
+      'TESTFLIGHT_MACOS_PROFILE_BASE64',
+    ]) {
+      assert.match(preflight, new RegExp(`secrets\\.${secret}`));
+      assert.match(preflight, new RegExp(`-z "\\$${secret}"`));
+    }
+
+    for (const value of ['POWERSYNC_URL', 'WORKER_URL', 'GOOGLE_WEB_CLIENT_ID']) {
+      assert.match(preflight, new RegExp(`${value}: \\$\\{\\{ vars\\.${value} \\}\\}`));
+      assert.match(preflight, new RegExp(`-z "\\$${value}"`));
+    }
+  });
+
+  it('builds release apps with their required production runtime configuration', () => {
+    const preflight = buildUpload.slice(
+      buildUpload.indexOf('name: Validate all TestFlight environment inputs'),
+      buildUpload.indexOf('\n      - name:', buildUpload.indexOf('name: Validate all TestFlight environment inputs') + 1),
+    );
+
+    for (const value of ['POWERSYNC_URL', 'WORKER_URL', 'GOOGLE_WEB_CLIENT_ID']) {
+      assert.match(buildUpload, new RegExp(`${value}: \\$\\{\\{ vars\\.${value} \\}\\}`));
+      assert.match(preflight, new RegExp(`-z "\\$${value}"`));
+      assert.doesNotMatch(publishingWorkflow, new RegExp(`secrets\\.${value}`));
+    }
+
+    const iosBuildStart = buildUpload.indexOf('name: Build the iOS/iPadOS TestFlight IPA');
+    const iosBuildEnd = buildUpload.indexOf('\n      - name:', iosBuildStart + 1);
+    const iosBuild = buildUpload.slice(iosBuildStart, iosBuildEnd);
+    assert.match(iosBuild, /--dart-define=PLANNER_ENV=prod/);
+    assert.match(iosBuild, /--dart-define="POWERSYNC_URL=\$POWERSYNC_URL"/);
+    assert.match(iosBuild, /--dart-define="WORKER_URL=\$WORKER_URL"/);
+    assert.match(iosBuild, /--dart-define="GOOGLE_WEB_CLIENT_ID=\$GOOGLE_WEB_CLIENT_ID"/);
+
+    const macBuildStart = buildUpload.indexOf('name: Archive and export the macOS TestFlight package');
+    const macBuildEnd = buildUpload.indexOf('\n      - name:', macBuildStart + 1);
+    const macBuild = buildUpload.slice(macBuildStart, macBuildEnd);
+    assert.match(macBuild, /encode_define 'PLANNER_ENV=prod'/);
+    assert.match(macBuild, /encode_define "POWERSYNC_URL=\$POWERSYNC_URL"/);
+    assert.match(macBuild, /encode_define "WORKER_URL=\$WORKER_URL"/);
+    assert.match(macBuild, /encode_define "GOOGLE_WEB_CLIENT_ID=\$GOOGLE_WEB_CLIENT_ID"/);
+    assert.match(macBuild, /DART_DEFINES="\$DART_DEFINES"/);
+  });
+
+  it('builds both tested Apple targets with one build number before uploading', () => {
+    assert.match(buildUpload, /flutter-version:\s*['"]?3\.47\.4/);
+    assert.match(buildUpload, /inputs\.source_sha/);
+    assert.match(buildUpload, /scripts\/testflight\/build-number\.mjs/);
+    assert.match(buildUpload, /ios\/ExportOptions\.testflight\.plist/);
+    assert.match(buildUpload, /macos\/ExportOptions\.testflight\.plist/);
+    assert.match(buildUpload, /xcodebuild[\s\S]*?archive/);
+    assert.match(buildUpload, /xcodebuild[\s\S]*?exportArchive/);
+    assert.match(buildUpload, /-t ios/);
+    assert.match(buildUpload, /-t macos/);
+    assert.match(buildUpload, /-p @env:TESTFLIGHT_APP_SPECIFIC_PASSWORD/);
+    assert.match(buildUpload, /CURRENT_PROJECT_VERSION="\$BUILD_NUMBER"/);
+
+    const ipaCheck = buildUpload.indexOf('ipas=()');
+    const packageCheck = buildUpload.indexOf('packages=()');
+    const iosUpload = buildUpload.indexOf('if xcrun altool --upload-app');
+    const macUpload = buildUpload.indexOf('if xcrun altool --upload-app', iosUpload + 1);
+    assert.ok(ipaCheck >= 0 && packageCheck > ipaCheck);
+    assert.ok(iosUpload > packageCheck && macUpload > iosUpload);
+    assert.ok(buildUpload.indexOf('-t ios', iosUpload) < macUpload);
+    assert.ok(buildUpload.indexOf('-t macos', macUpload) > macUpload);
+    assert.match(buildUpload, /--build-number\s+"\$BUILD_NUMBER"/);
+  });
+
+  it('reports platform outcomes separately and cleans signing material', () => {
+    assert.match(buildUpload, /IOS_UPLOAD_STATUS/);
+    assert.match(buildUpload, /MACOS_UPLOAD_STATUS/);
+    assert.match(buildUpload, /if:\s*always\(\)/);
+    assert.match(buildUpload, /security delete-keychain/);
+    assert.match(buildUpload, /Provisioning Profiles/);
+    assert.match(buildUpload, /rm -rf/);
+    assert.doesNotMatch(publishingWorkflow, /upload-artifact|gh release|create-release/i);
+  });
+});
+
+describe('TestFlight secret-free validation workflow', () => {
+  it('runs the contract and helper suite on public PRs and main pushes', () => {
+    assert.match(validationWorkflow, /^on:\n  pull_request:\n  push:\n    branches:\n      - main$/m);
+    assert.match(validationWorkflow, /runs-on:\s*ubuntu-latest/);
+    assert.match(validationWorkflow, /node-version:\s*['"]?24/);
+    assert.match(validationWorkflow, /node --test tests\/testflight\/\*\.test\.mjs/);
+    assert.match(validationWorkflow, /ruby -e 'require "yaml"/);
+    assert.match(validationWorkflow, /\.github\/workflows\/testflight\.yml/);
+    assert.match(validationWorkflow, /\.github\/workflows\/testflight-validation\.yml/);
+    assert.doesNotMatch(validationWorkflow, /secrets\.|environment:\s*testflight|TESTFLIGHT_/);
+  });
+});
