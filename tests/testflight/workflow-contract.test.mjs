@@ -47,7 +47,7 @@ describe('TestFlight publishing workflow contract', () => {
   it('validates the exact source run before the Apple environment can start', () => {
     assert.match(verifySource, /runs-on:\s*ubuntu-latest/);
     assert.match(buildUpload, /runs-on:\s*macos-26-intel/);
-    assert.match(buildUpload, /needs:\s*verify-source/);
+    assert.match(buildUpload, /needs:\s*-\s*verify-source/);
     assert.match(buildUpload, /environment:\s*testflight/);
     assert.doesNotMatch(verifySource, /environment:\s*testflight/);
     assert.doesNotMatch(verifySource, /TESTFLIGHT_[A-Z0-9_]+/);
@@ -68,13 +68,39 @@ describe('TestFlight publishing workflow contract', () => {
     }
   });
 
+  it('validates production App Check and desktop posture before Apple signing', () => {
+    const productionPolicy = jobBlock(
+      publishingWorkflow,
+      'validate-production-policy',
+    );
+
+    assert.match(productionPolicy, /runs-on:\s*ubuntu-latest/);
+    assert.match(productionPolicy, /needs:\s*verify-source/);
+    assert.doesNotMatch(productionPolicy, /environment:\s*testflight/);
+    assert.match(productionPolicy, /ref:\s*\$\{\{\s*inputs\.source_sha\s*\}\}/);
+    assert.match(productionPolicy, /token:\s*\$\{\{\s*secrets\.PLANNER_PAT\s*\}\}/);
+    assert.match(productionPolicy, /PLANNER_DESKTOP_POSTURE:\s*attested/);
+    assert.match(
+      productionPolicy,
+      /node tools\/release\/release-policy\.mjs --environment prod --target ios/,
+    );
+    assert.match(
+      productionPolicy,
+      /node tools\/release\/release-policy\.mjs --environment prod --target macos/,
+    );
+    assert.match(
+      buildUpload,
+      /needs:\s*\n\s*- verify-source\s*\n\s*- validate-production-policy/,
+    );
+  });
+
   it('limits the private PAT and Apple secrets to their intended steps', () => {
     assert.match(verifySource, /GH_TOKEN:\s*\$\{\{\s*secrets\.PLANNER_PAT\s*\}\}/);
     assert.match(buildUpload, /token:\s*\$\{\{\s*secrets\.PLANNER_PAT\s*\}\}/);
     assert.equal(
       [...publishingWorkflow.matchAll(/secrets\.PLANNER_PAT/g)].length,
-      2,
-      'the private PAT must only be used for source metadata and checkout',
+      3,
+      'the private PAT must only be used for source metadata and source checkouts',
     );
 
     for (const secret of [
