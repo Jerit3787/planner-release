@@ -374,6 +374,28 @@ jobs:
             --dart-define="GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID" \
             --export-options-plist=ios/ExportOptions.testflight.plist
 
+      - name: Generate Flutter macOS archive configuration
+        working-directory: planner/app
+        shell: bash
+        env:
+          BUILD_NUMBER: ${{ steps.build-metadata.outputs.build_number }}
+          APP_VERSION: ${{ steps.build-metadata.outputs.app_version }}
+          POWERSYNC_URL: ${{ vars.POWERSYNC_URL }}
+          WORKER_URL: ${{ vars.WORKER_URL }}
+          GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          flutter build macos \
+            --config-only \
+            --release \
+            --no-pub \
+            --build-name "$APP_VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --dart-define=PLANNER_ENV=prod \
+            --dart-define="POWERSYNC_URL=$POWERSYNC_URL" \
+            --dart-define="WORKER_URL=$WORKER_URL" \
+            --dart-define="GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID"
+
       - name: Archive and export the macOS TestFlight package
         working-directory: planner/app
         shell: bash
