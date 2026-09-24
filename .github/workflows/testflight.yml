@@ -197,7 +197,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          xcode_version="$(xcodebuild -version | awk '/^Xcode / { print $2; exit }')"
+          xcode_version_output="$(xcodebuild -version)"
+          xcode_version="${xcode_version_output#Xcode }"
+          xcode_version="${xcode_version%%$'\n'*}"
           xcode_major="${xcode_version%%.*}"
           [[ "$xcode_major" =~ ^[0-9]+$ ]] && (( xcode_major >= 26 )) || {
             echo '::error::TestFlight builds require Xcode 26 or later.'
