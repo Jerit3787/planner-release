@@ -144,6 +144,26 @@ describe('TestFlight publishing workflow contract', () => {
     }
   });
 
+  it('captures complete Xcode version output before parsing it', () => {
+    const preflightStart = buildUpload.indexOf(
+      'name: Check Xcode and App Store uploader support',
+    );
+    const preflightEnd = buildUpload.indexOf('\n      - name:', preflightStart + 1);
+    assert.ok(preflightStart >= 0 && preflightEnd > preflightStart);
+
+    const preflight = buildUpload.slice(preflightStart, preflightEnd);
+    assert.match(preflight, /xcode_version_output="\$\(xcodebuild -version\)"/);
+    assert.match(
+      preflight,
+      /xcode_version="\$\{xcode_version_output#Xcode \}"/,
+    );
+    assert.match(
+      preflight,
+      /xcode_version="\$\{xcode_version%%\$'\\n'\*\}"/,
+    );
+    assert.doesNotMatch(preflight, /xcodebuild -version\s*\|\s*awk/);
+  });
+
   it('builds release apps with their required production runtime configuration', () => {
     const preflight = buildUpload.slice(
       buildUpload.indexOf('name: Validate all TestFlight environment inputs'),
