@@ -190,7 +190,15 @@ jobs:
         with:
           channel: stable
           flutter-version: '3.47.4'
-          cache: false
+          cache: true
+
+      - name: Cache Swift Package Manager dependencies
+        uses: actions/cache@v5
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-${{ hashFiles('planner/app/**/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-
 
       - name: Check Xcode and App Store uploader support
         shell: bash
