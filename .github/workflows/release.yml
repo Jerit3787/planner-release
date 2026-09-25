@@ -257,7 +257,7 @@ jobs:
         uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '25'
           # No `cache: gradle` here — the Gradle project doesn't exist until
           # `tauri android init` runs later, so setup-java's cache step fails at
           # this point with "No file matched ... gradle*" (planner issue: Android
