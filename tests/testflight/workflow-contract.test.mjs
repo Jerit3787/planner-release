@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
@@ -6,6 +7,17 @@ const publishingWorkflow = readFileSync('.github/workflows/testflight.yml', 'utf
 const validationWorkflow = readFileSync(
   '.github/workflows/testflight-validation.yml',
   'utf8',
+);
+const parsedPublishingWorkflow = JSON.parse(
+  execFileSync(
+    'ruby',
+    [
+      '-e',
+      'require "json"; require "yaml"; puts JSON.generate(YAML.load_file(ARGV.fetch(0), aliases: true))',
+      '.github/workflows/testflight.yml',
+    ],
+    { encoding: 'utf8' },
+  ),
 );
 
 function jobBlock(workflow, id) {
@@ -42,6 +54,44 @@ describe('TestFlight publishing workflow contract', () => {
     assert.match(publishingWorkflow, /^permissions:\n  contents: read$/m);
     assert.match(verifySource, /if:\s*\$\{\{\s*github\.ref == 'refs\/heads\/main'\s*\}\}/);
     assert.match(buildUpload, /if:\s*\$\{\{\s*github\.ref == 'refs\/heads\/main'\s*\}\}/);
+  });
+
+  it('enables the pinned Flutter action cache for the SDK and pub dependencies', () => {
+    const flutterSetup = parsedPublishingWorkflow.jobs['build-upload'].steps.find(
+      (step) => step.name === 'Set up Flutter 3.47.4',
+    );
+
+    assert.ok(flutterSetup, 'the pinned Flutter setup step must exist');
+    assert.equal(flutterSetup.uses, 'subosito/flutter-action@v2.22.0');
+    assert.equal(flutterSetup.with.cache, true);
+  });
+
+  it('restores SwiftPM dependencies before either Apple build using lockfile-based keys', () => {
+    const steps = parsedPublishingWorkflow.jobs['build-upload'].steps;
+    const cacheIndex = steps.findIndex(
+      (step) => step.name === 'Cache Swift Package Manager dependencies',
+    );
+
+    assert.notEqual(cacheIndex, -1, 'the SwiftPM cache step must exist');
+    const cacheStep = steps[cacheIndex];
+    assert.equal(cacheStep.uses, 'actions/cache@v5');
+    assert.equal(cacheStep.with.path, '~/Library/Caches/org.swift.swiftpm');
+    assert.match(
+      cacheStep.with.key,
+      /^\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-swiftpm-\$\{\{ hashFiles\('planner\/app\/\*\*\/Package\.resolved'\) \}\}$/,
+    );
+    assert.match(
+      cacheStep.with['restore-keys'],
+      /^\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-swiftpm-\n?$/,
+    );
+
+    for (const buildName of [
+      'Build the iOS/iPadOS TestFlight IPA',
+      'Generate Flutter macOS archive configuration',
+    ]) {
+      const buildIndex = steps.findIndex((step) => step.name === buildName);
+      assert.ok(buildIndex > cacheIndex, `SwiftPM cache must precede ${buildName}`);
+    }
   });
 
   it('validates the exact source run before the Apple environment can start', () => {
