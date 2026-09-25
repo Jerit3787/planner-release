@@ -193,7 +193,7 @@ jobs:
           cache: true
 
       - name: Cache Swift Package Manager dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/Library/Caches/org.swift.swiftpm
           key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-${{ hashFiles('planner/app/**/Package.resolved') }}
