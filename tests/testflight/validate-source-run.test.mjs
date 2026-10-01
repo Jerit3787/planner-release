@@ -27,9 +27,20 @@ describe('validateSourceRun', () => {
     assert.equal(validateSourceRun(run, requiredJobs, expected), true);
   });
 
+  it('accepts a manual run on dev the same way', () => {
+    // planner runs its Tests workflow by hand while Actions minutes are
+    // limited (2026-10-01); a manual dev run with every check green counts.
+    assert.equal(
+      validateSourceRun({ ...run, event: 'workflow_dispatch' }, requiredJobs, expected),
+      true,
+    );
+  });
+
   it('rejects wrong event, ref, SHA, run ID, or attempt', () => {
     for (const [runOverride, expectedOverride] of [
       [{ event: 'pull_request' }, {}],
+      [{ event: 'schedule' }, {}],
+      [{ event: 'workflow_dispatch', head_branch: 'main' }, {}],
       [{ head_branch: 'main' }, {}],
       [{ head_sha: 'b'.repeat(40) }, {}],
       [{ id: 4100000001 }, {}],

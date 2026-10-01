@@ -331,8 +331,10 @@ describe('TestFlight publishing workflow contract', () => {
 });
 
 describe('TestFlight secret-free validation workflow', () => {
-  it('runs the contract and helper suite on public PRs and main pushes', () => {
-    assert.match(validationWorkflow, /^on:\n  pull_request:\n  push:\n    branches:\n      - main$/m);
+  it('runs the contract and helper suite by hand only', () => {
+    // Manual while Actions minutes are limited (2026-10-01).
+    assert.match(validationWorkflow, /^on:\n  workflow_dispatch:\n/m);
+    assert.doesNotMatch(validationWorkflow, /^  (pull_request|push):/m);
     assert.match(validationWorkflow, /runs-on:\s*ubuntu-latest/);
     assert.match(validationWorkflow, /node-version:\s*['"]?24/);
     assert.match(validationWorkflow, /node --test tests\/testflight\/\*\.test\.mjs/);
