@@ -33,7 +33,9 @@ export function validateSourceRun(run, jobs, expected) {
     Number(expected.sourceRunAttempt) > 51 ||
     String(run.id) !== expected.sourceRunId ||
     String(run.run_attempt) !== expected.sourceRunAttempt ||
-    run.event !== 'push' ||
+    // A push, or a manual run: planner runs Tests by hand while Actions
+    // minutes are limited (2026-10-01). Either way, on dev and all green.
+    !['push', 'workflow_dispatch'].includes(run.event) ||
     run.head_branch !== 'dev' ||
     run.head_sha !== expected.sourceSha ||
     run.status !== 'completed' ||

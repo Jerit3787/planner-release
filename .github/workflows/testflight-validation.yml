@@ -1,10 +1,8 @@
 name: TestFlight Workflow Validation
 
+# Manual only while GitHub Actions minutes are limited (2026-10-01).
 on:
-  pull_request:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
