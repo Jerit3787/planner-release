@@ -39,21 +39,56 @@ describe('TestFlight publishing workflow contract', () => {
     assert.match(trigger, /^  workflow_dispatch:\n    inputs:/m);
     assert.doesNotMatch(trigger, /^  (?!workflow_dispatch:)[a-z_]+:/m);
 
-    for (const input of [
-      'source_ref',
-      'source_sha',
-      'source_run_id',
-      'source_run_attempt',
-    ]) {
+    for (const input of ['source_ref', 'source_sha']) {
       assert.match(
         trigger,
         new RegExp(`^      ${input}:\\n        description:[^\\n]+\\n        required: true\\n        type: string$`, 'm'),
       );
     }
 
+    for (const input of ['source_run_id', 'source_run_attempt']) {
+      assert.match(
+        trigger,
+        new RegExp(`^      ${input}:\\n        description:[^\\n]+\\n        required: false\\n        default: '0'\\n        type: string$`, 'm'),
+      );
+    }
+
+    assert.match(
+      trigger,
+      /^      local_verification:\n        description:[^\n]+\n        required: false\n        default: false\n        type: boolean$/m,
+    );
     assert.match(publishingWorkflow, /^permissions:\n  contents: read$/m);
     assert.match(verifySource, /if:\s*\$\{\{\s*github\.ref == 'refs\/heads\/main'\s*\}\}/);
     assert.match(buildUpload, /if:\s*\$\{\{\s*github\.ref == 'refs\/heads\/main'\s*\}\}/);
+  });
+
+  it('can run the Flutter gate here when the private run is unavailable', () => {
+    const verifyStep = parsedPublishingWorkflow.jobs['verify-source'].steps.find(
+      (step) => step.name === 'Verify the exact private source run and required checks',
+    );
+    assert.ok(verifyStep, 'the private source verification step must exist');
+    assert.equal(verifyStep.if, '${{ !inputs.local_verification }}');
+
+    const policySteps = parsedPublishingWorkflow.jobs['validate-production-policy'].steps;
+    const flutterSetup = policySteps.find(
+      (step) => step.name === 'Set up Flutter 3.50.1 for the local gate',
+    );
+    assert.ok(flutterSetup, 'the local Flutter setup step must exist');
+    assert.equal(flutterSetup.if, '${{ inputs.local_verification }}');
+    assert.equal(flutterSetup.with['flutter-version'], '3.50.1');
+
+    const gate = policySteps.find((step) => step.name === 'Run the Flutter gate locally');
+    assert.ok(gate, 'the local Flutter gate must exist');
+    assert.equal(gate.if, '${{ inputs.local_verification }}');
+    assert.equal(gate['working-directory'], 'planner/app');
+    for (const command of [
+      /flutter pub get/,
+      /dart format --output=none --set-exit-if-changed/,
+      /flutter analyze/,
+      /flutter test --concurrency=1/,
+    ]) {
+      assert.match(gate.run, command);
+    }
   });
 
   it('enables the pinned Flutter action cache for the SDK and pub dependencies', () => {

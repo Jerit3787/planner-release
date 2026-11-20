@@ -12,13 +12,20 @@ on:
         required: true
         type: string
       source_run_id:
-        description: 'Private planner workflow run ID'
-        required: true
+        description: 'Private planner workflow run ID (0 for local verification)'
+        required: false
+        default: '0'
         type: string
       source_run_attempt:
-        description: 'Private planner workflow run attempt'
-        required: true
+        description: 'Private planner workflow run attempt (0 for local verification)'
+        required: false
+        default: '0'
         type: string
+      local_verification:
+        description: 'Run the Flutter gate in this repository instead of a private planner run'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -46,6 +53,7 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          LOCAL_VERIFICATION: ${{ inputs.local_verification }}
         run: |
           set -euo pipefail
 
@@ -56,8 +64,13 @@ jobs:
 
           [[ "$SOURCE_REF" == 'dev' ]] || fail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail
-          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || fail
-          [[ "$SOURCE_RUN_ATTEMPT" =~ ^([1-9]|[1-4][0-9]|5[01])$ ]] || fail
+          if [[ "$LOCAL_VERIFICATION" == 'true' ]]; then
+            [[ "$SOURCE_RUN_ID" == '0' ]] || fail
+            [[ "$SOURCE_RUN_ATTEMPT" == '0' ]] || fail
+          else
+            [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || fail
+            [[ "$SOURCE_RUN_ATTEMPT" =~ ^([1-9]|[1-4][0-9]|5[01])$ ]] || fail
+          fi
 
           {
             echo "source_ref=$SOURCE_REF"
@@ -67,6 +80,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Verify the exact private source run and required checks
+        if: ${{ !inputs.local_verification }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.PLANNER_PAT }}
@@ -146,6 +160,25 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24'
+
+      - name: Set up Flutter 3.50.1 for the local gate
+        if: ${{ inputs.local_verification }}
+        uses: subosito/flutter-action@v2.23.0
+        with:
+          channel: stable
+          flutter-version: '3.50.1'
+          cache: true
+
+      - name: Run the Flutter gate locally
+        if: ${{ inputs.local_verification }}
+        working-directory: planner/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter pub get
+          dart format --output=none --set-exit-if-changed lib test test_driver integration_test tool
+          flutter analyze
+          flutter test --concurrency=1
 
       - name: Validate production release policies
         working-directory: planner
