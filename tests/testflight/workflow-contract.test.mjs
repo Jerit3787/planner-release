@@ -58,11 +58,11 @@ describe('TestFlight publishing workflow contract', () => {
 
   it('enables the pinned Flutter action cache for the SDK and pub dependencies', () => {
     const flutterSetup = parsedPublishingWorkflow.jobs['build-upload'].steps.find(
-      (step) => step.name === 'Set up Flutter 3.47.4',
+      (step) => step.name === 'Set up Flutter 3.50.1',
     );
 
     assert.ok(flutterSetup, 'the pinned Flutter setup step must exist');
-    assert.equal(flutterSetup.uses, 'subosito/flutter-action@v2.22.0');
+    assert.equal(flutterSetup.uses, 'subosito/flutter-action@v2.23.0');
     assert.equal(flutterSetup.with.cache, true);
   });
 
@@ -74,7 +74,7 @@ describe('TestFlight publishing workflow contract', () => {
 
     assert.notEqual(cacheIndex, -1, 'the SwiftPM cache step must exist');
     const cacheStep = steps[cacheIndex];
-    assert.equal(cacheStep.uses, 'actions/cache@v5');
+    assert.equal(cacheStep.uses, 'actions/cache@v6');
     assert.equal(cacheStep.with.path, '~/Library/Caches/org.swift.swiftpm');
     assert.match(
       cacheStep.with.key,
@@ -296,7 +296,7 @@ describe('TestFlight publishing workflow contract', () => {
   });
 
   it('builds both tested Apple targets with one build number before uploading', () => {
-    assert.match(buildUpload, /flutter-version:\s*['"]?3\.47\.4/);
+    assert.match(buildUpload, /flutter-version:\s*['"]?3\.50\.1/);
     assert.match(buildUpload, /inputs\.source_sha/);
     assert.match(buildUpload, /scripts\/testflight\/build-number\.mjs/);
     assert.match(buildUpload, /ios\/ExportOptions\.testflight\.plist/);
