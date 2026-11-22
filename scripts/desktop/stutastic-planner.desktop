@@ -7,3 +7,4 @@ Icon=stutastic-planner
 Terminal=false
 Categories=Education;Office;
 StartupNotify=true
+StartupWMClass=com.danishstudioproduction.planner
