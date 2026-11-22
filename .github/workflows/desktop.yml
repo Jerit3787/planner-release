@@ -1,0 +1,307 @@
+name: Desktop (Windows and Linux)
+
+# Builds, smoke-tests and publishes the Flutter desktop apps (planner desktop
+# design, 2026-11-22). Releases are tagged desktop-v<version> and are NEVER
+# marked Latest: the old Tauri app updates from releases/latest, and the last
+# step fails the run if Latest stops being a v<version> release. The signed
+# update manifest lives on the fixed desktop-channel release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 'Exact private planner commit to build'
+        required: true
+        type: string
+      notes:
+        description: 'Release notes, shown in the app''s update sheet'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.key }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - key: windows-x64
+            os: windows
+            arch: x64
+            runner: windows-latest
+          - key: linux-x64
+            os: linux
+            arch: x64
+            runner: ubuntu-24.04
+          - key: linux-arm64
+            os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      POWERSYNC_URL: ${{ vars.POWERSYNC_URL }}
+      WORKER_URL: ${{ vars.WORKER_URL }}
+      GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
+      GOOGLE_DESKTOP_CLIENT_ID: ${{ vars.GOOGLE_DESKTOP_CLIENT_ID }}
+      PLANNER_APPLE_SERVICES_ID: ${{ vars.PLANNER_APPLE_SERVICES_ID }}
+      PLANNER_DESKTOP_FIREBASE_API_KEY: ${{ vars.PLANNER_DESKTOP_FIREBASE_API_KEY }}
+    steps:
+      - name: Checkout the public release repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout the private planner revision
+        uses: actions/checkout@v7
+        with:
+          repository: Jerit3787/planner
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.PLANNER_PAT }}
+          path: planner
+          persist-credentials: false
+
+      - name: Check the build settings are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in POWERSYNC_URL WORKER_URL GOOGLE_DESKTOP_CLIENT_ID PLANNER_APPLE_SERVICES_ID; do
+            [ -n "${!name}" ] || { echo "::error::Repository variable $name is not set."; exit 1; }
+          done
+
+      - name: Resolve the app version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_VERSION="$(awk '$1 == "version:" { print $2; exit }' planner/app/pubspec.yaml)"
+          APP_VERSION="${APP_VERSION%%+*}"
+          [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo '::error::The app version must be x.y.z for desktop updates.'
+            exit 1
+          }
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Flutter 3.50.1 (Windows)
+        if: ${{ matrix.os == 'windows' }}
+        uses: subosito/flutter-action@v2.23.0
+        with:
+          channel: stable
+          flutter-version: '3.50.1'
+          cache: true
+
+      # The ARM runner has no flutter-action archive; a clone of the tag is the
+      # same SDK on both Linux architectures, as in app/tool/desktop_linux.Dockerfile.
+      - name: Set up Flutter 3.50.1 and build packages (Linux)
+        if: ${{ matrix.os == 'linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev libsecret-1-dev libayatana-appindicator3-dev libstdc++-12-dev \
+            xvfb xauth dbus-x11 gnome-keyring
+          git clone --depth 1 --branch 3.50.1 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch packages
+        shell: bash
+        working-directory: planner/app
+        run: |
+          set -euo pipefail
+          flutter config --no-analytics --enable-${{ matrix.os }}-desktop
+          flutter pub get
+
+      - name: Smoke test (Linux)
+        if: ${{ matrix.os == 'linux' }}
+        shell: bash
+        working-directory: planner/app
+        run: |
+          set -euo pipefail
+          dbus-run-session -- bash -c '
+            set -euo pipefail
+            echo | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            for phase in seed verify; do
+              xvfb-run -a flutter test integration_test/desktop_startup_test.dart -d linux \
+                --dart-define=SMOKE_PHASE=$phase \
+                --dart-define=PLANNER_ENV=prod \
+                --dart-define=POWERSYNC_URL=$POWERSYNC_URL \
+                --dart-define=WORKER_URL=$WORKER_URL
+            done'
+
+      - name: Smoke test (Windows)
+        if: ${{ matrix.os == 'windows' }}
+        shell: bash
+        working-directory: planner/app
+        run: |
+          set -euo pipefail
+          for phase in seed verify; do
+            flutter test integration_test/desktop_startup_test.dart -d windows \
+              --dart-define=SMOKE_PHASE=$phase \
+              --dart-define=PLANNER_ENV=prod \
+              --dart-define="POWERSYNC_URL=$POWERSYNC_URL" \
+              --dart-define="WORKER_URL=$WORKER_URL"
+          done
+
+      - name: Build the release
+        shell: bash
+        working-directory: planner/app
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          flutter build ${{ matrix.os }} --release \
+            --build-name "$APP_VERSION" \
+            --dart-define=PLANNER_ENV=prod \
+            --dart-define="POWERSYNC_URL=$POWERSYNC_URL" \
+            --dart-define="WORKER_URL=$WORKER_URL" \
+            --dart-define="GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID" \
+            --dart-define="GOOGLE_DESKTOP_CLIENT_ID=$GOOGLE_DESKTOP_CLIENT_ID" \
+            --dart-define="PLANNER_APPLE_SERVICES_ID=$PLANNER_APPLE_SERVICES_ID" \
+            --dart-define="PLANNER_DESKTOP_FIREBASE_API_KEY=$PLANNER_DESKTOP_FIREBASE_API_KEY"
+
+      - name: Package the Windows installer
+        if: ${{ matrix.os == 'windows' }}
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install innosetup --no-progress -y
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          $bundle = Resolve-Path 'planner/app/build/windows/x64/runner/Release'
+          $icon = Resolve-Path 'planner/app/windows/runner/resources/app_icon.ico'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          & $iscc "/DAppVersion=$env:APP_VERSION" "/DBuildDir=$bundle" "/DIconFile=$icon" "/DOutputDir=$(Resolve-Path dist)" scripts/desktop/planner.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+
+      - name: Package the AppImage and .deb
+        if: ${{ matrix.os == 'linux' }}
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          bundle="planner/app/build/linux/${{ matrix.arch }}/release/bundle"
+          bash scripts/desktop/build-appimage.sh "$bundle" "$APP_VERSION" ${{ matrix.arch }} dist
+          bash scripts/desktop/build-deb.sh "$bundle" "$APP_VERSION" ${{ matrix.arch }} dist
+
+      - name: Upload the packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.key }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout the public release repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout the private planner revision
+        uses: actions/checkout@v7
+        with:
+          repository: Jerit3787/planner
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.PLANNER_PAT }}
+          path: planner
+          persist-credentials: false
+          sparse-checkout: app/pubspec.yaml
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Download the packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: dist
+
+      - name: Check Latest before publishing
+        run: bash scripts/desktop/assert-latest-unchanged.sh
+
+      - name: Publish desktop-v<version> (never Latest)
+        id: release
+        shell: bash
+        env:
+          NOTES: ${{ inputs.notes }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          VERSION="$(awk '$1 == "version:" { print $2; exit }' planner/app/pubspec.yaml)"
+          VERSION="${VERSION%%+*}"
+          TAG="desktop-v$VERSION"
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            echo "::error::$TAG already exists; bump the app version first."
+            exit 1
+          fi
+          ls -l dist
+          gh release create "$TAG" dist/* -R "$REPO" \
+            --latest=false \
+            --target "$GITHUB_SHA" \
+            --title "Stutastic Planner $VERSION (Windows and Linux)" \
+            --notes "$NOTES"$'\n\n'"Built from planner ${SOURCE_SHA:0:12}."
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Sign and publish the update manifest
+        shell: bash
+        env:
+          NOTES: ${{ inputs.notes }}
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          DESKTOP_UPDATE_SIGNING_KEY: ${{ secrets.DESKTOP_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$DESKTOP_UPDATE_SIGNING_KEY" ] || { echo '::error::DESKTOP_UPDATE_SIGNING_KEY is not set.'; exit 1; }
+          base="https://github.com/$REPO/releases/download/$TAG"
+          asset() { # <platform key> <file>
+            local file="dist/$2"
+            [ -f "$file" ] || { echo "::error::missing $file"; exit 1; }
+            echo "--asset $1=$base/$2=$(sha256sum "$file" | cut -d' ' -f1)"
+          }
+          printf '%s' "$NOTES" > "$RUNNER_TEMP/notes.txt"
+          # shellcheck disable=SC2046
+          node scripts/desktop/make-manifest.mjs \
+            --version "$VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.txt" \
+            $(asset windows-x64 "stutastic-planner-$VERSION-windows-x64-setup.exe") \
+            $(asset linux-x64-appimage "stutastic-planner-$VERSION-linux-x64.AppImage") \
+            $(asset linux-arm64-appimage "stutastic-planner-$VERSION-linux-arm64.AppImage") \
+            $(asset linux-x64-deb "stutastic-planner_${VERSION}_amd64.deb") \
+            $(asset linux-arm64-deb "stutastic-planner_${VERSION}_arm64.deb") \
+            --key-env DESKTOP_UPDATE_SIGNING_KEY \
+            --out "$RUNNER_TEMP/channel"
+          if ! gh release view desktop-channel -R "$REPO" >/dev/null 2>&1; then
+            gh release create desktop-channel -R "$REPO" \
+              --latest=false --prerelease \
+              --target "$GITHUB_SHA" \
+              --title "Desktop update channel" \
+              --notes "The Windows and Linux apps read their update manifest from here. Downloads are on the desktop-v releases."
+          fi
+          gh release upload desktop-channel -R "$REPO" --clobber \
+            "$RUNNER_TEMP/channel/desktop.json" "$RUNNER_TEMP/channel/desktop.json.sig"
+
+      - name: Check Latest after publishing
+        if: ${{ always() }}
+        run: bash scripts/desktop/assert-latest-unchanged.sh
