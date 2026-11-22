@@ -119,6 +119,19 @@ describe('TestFlight publishing workflow contract', () => {
     ]) {
       assert.match(gate.run, command);
     }
+
+    // tray_manager 0.9 / window_manager 0.7 build cnativeapi for the host
+    // during flutter test, and on Linux that needs GTK 3, X11 and Xi.
+    const libsIndex = policySteps.findIndex(
+      (step) => step.name === 'Install the Linux libraries the desktop plugins build against',
+    );
+    assert.ok(libsIndex >= 0, 'the local gate must install the desktop plugins\' Linux libraries');
+    const libs = policySteps[libsIndex];
+    assert.equal(libs.if, '${{ inputs.local_verification }}');
+    for (const pkg of ['libgtk-3-dev', 'libx11-dev', 'libxi-dev']) {
+      assert.match(libs.run, new RegExp(pkg));
+    }
+    assert.ok(libsIndex < policySteps.indexOf(gate), 'the libraries come before the gate');
   });
 
   it('enables the pinned Flutter action cache for the SDK and pub dependencies', () => {
