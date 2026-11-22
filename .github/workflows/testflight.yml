@@ -26,6 +26,11 @@ on:
         required: false
         default: false
         type: boolean
+      desktop_notes:
+        description: 'Also build Windows and Linux with this build number; these are their release notes (empty: Apple only)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -190,6 +195,47 @@ jobs:
 
           node tools/release/release-policy.mjs --environment prod --target ios
           node tools/release/release-policy.mjs --environment prod --target macos
+
+  # Windows and Linux get this run's build number, so 3.0.0 (4601) is the
+  # same source everywhere (desktop build numbers, 2026-11-23). desktop.yml
+  # builds, smoke-tests and publishes them; it starts once the source gate
+  # has passed, alongside the Apple signing.
+  desktop:
+    if: ${{ github.ref == 'refs/heads/main' && inputs.desktop_notes != '' }}
+    needs:
+      - verify-source
+      - validate-production-policy
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout the public release repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Start the Windows and Linux build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          NOTES: ${{ inputs.desktop_notes }}
+        run: |
+          set -euo pipefail
+          BUILD_NUMBER="$(node scripts/testflight/build-number.mjs "$GITHUB_RUN_NUMBER" "$GITHUB_RUN_ATTEMPT")"
+          # One request: a dispatch is not idempotent, so no retry.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/desktop.yml/dispatches" \
+            -f ref=main \
+            -f "inputs[source_sha]=$SOURCE_SHA" \
+            -f "inputs[build_number]=$BUILD_NUMBER" \
+            -f "inputs[notes]=$NOTES"
+          echo "Started desktop.yml for 3.0.0 ($BUILD_NUMBER) from ${SOURCE_SHA:0:12}." >> "$GITHUB_STEP_SUMMARY"
 
   build-upload:
     if: ${{ github.ref == 'refs/heads/main' }}

@@ -30,6 +30,36 @@ function jobBlock(workflow, id) {
 }
 
 describe('TestFlight publishing workflow contract', () => {
+  // Desktop builds share this run's build number, 3.0.0 (4601), when the
+  // dispatch asks for them (desktop build numbers, 2026-11-23).
+  it('dispatches the desktop build with its own build number when given notes', () => {
+    const trigger = publishingWorkflow.match(/^on:\n([\s\S]*?)^permissions:/m)?.[1];
+    assert.match(
+      trigger,
+      /^      desktop_notes:\n        description:[^\n]+\n        required: false\n        default: ''\n        type: string$/m,
+    );
+    const desktop = parsedPublishingWorkflow.jobs.desktop;
+    assert.ok(desktop, 'missing desktop job');
+    assert.deepEqual(desktop.needs, ['verify-source', 'validate-production-policy']);
+    assert.match(desktop.if, /github\.ref == 'refs\/heads\/main'/);
+    assert.match(desktop.if, /inputs\.desktop_notes != ''/);
+    assert.deepEqual(desktop.permissions, { actions: 'write', contents: 'read' });
+    const script = desktop.steps.map((step) => step.run ?? '').join('\n');
+    assert.match(
+      script,
+      /node scripts\/testflight\/build-number\.mjs "\$GITHUB_RUN_NUMBER" "\$GITHUB_RUN_ATTEMPT"/,
+    );
+    assert.match(script, /actions\/workflows\/desktop\.yml\/dispatches/);
+    for (const input of ['source_sha', 'build_number', 'notes']) {
+      assert.match(script, new RegExp(`inputs\\[${input}\\]=`));
+    }
+    // The Apple job computes its number the same way, from the same run.
+    assert.match(
+      buildUpload,
+      /node scripts\/testflight\/build-number\.mjs "\$GITHUB_RUN_NUMBER" "\$GITHUB_RUN_ATTEMPT"/,
+    );
+  });
+
   const verifySource = jobBlock(publishingWorkflow, 'verify-source');
   const buildUpload = jobBlock(publishingWorkflow, 'build-upload');
 
@@ -202,7 +232,12 @@ describe('TestFlight publishing workflow contract', () => {
       assert.doesNotMatch(verifySource, new RegExp(`secrets\\.${secret}`));
     }
 
-    assert.doesNotMatch(publishingWorkflow, /id-token:\s*write|actions:\s*write/i);
+    assert.doesNotMatch(publishingWorkflow, /id-token:\s*write/i);
+    // Only the desktop hand-off may start a workflow, and it holds no
+    // secrets: no PAT, no Apple material, just this run's token.
+    const desktop = jobBlock(publishingWorkflow, 'desktop');
+    assert.doesNotMatch(publishingWorkflow.replace(desktop, ''), /actions:\s*write/i);
+    assert.doesNotMatch(desktop, /secrets\./);
   });
 
   it('checks all Apple secrets and production runtime variables before decoding signing material', () => {
