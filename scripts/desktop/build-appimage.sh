@@ -39,15 +39,18 @@ cp -R "$bundle/." "$appdir/usr/lib/stutastic-planner/"
 cp "$here/stutastic-planner.desktop" "$appdir/stutastic-planner.desktop"
 cp "$bundle/data/app_icon.png" "$appdir/stutastic-planner.png"
 
-# The tray plugin links libayatana-appindicator at load time, and some
-# distros (Fedora Workstation) don't ship it, so it and its own libraries
-# travel inside the AppImage. AppRun puts them on the library path.
+# tray_manager 0.5's plugin links libayatana-appindicator at load time, and
+# some distros (Fedora Workstation) don't ship it, so it and its own libraries
+# travel inside the AppImage. AppRun puts them on the library path. From 0.9
+# the tray is nativeapi, which needs none of them: no plugin, nothing to bundle.
 mkdir -p "$appdir/usr/lib/stutastic-planner/bundled"
-for lib in $(ldd "$bundle/lib/libtray_manager_plugin.so" | awk '/ayatana|dbusmenu/ { print $3 }'); do
-  cp -L "$lib" "$appdir/usr/lib/stutastic-planner/bundled/"
-done
-ls "$appdir/usr/lib/stutastic-planner/bundled" | grep -q appindicator \
-  || { echo "::error::libayatana-appindicator was not found to bundle"; exit 1; }
+if [ -f "$bundle/lib/libtray_manager_plugin.so" ]; then
+  for lib in $(ldd "$bundle/lib/libtray_manager_plugin.so" | awk '/ayatana|dbusmenu/ { print $3 }'); do
+    cp -L "$lib" "$appdir/usr/lib/stutastic-planner/bundled/"
+  done
+  ls "$appdir/usr/lib/stutastic-planner/bundled" | grep -q appindicator \
+    || { echo "::error::libayatana-appindicator was not found to bundle"; exit 1; }
+fi
 
 cat > "$appdir/AppRun" <<'RUN'
 #!/bin/sh
