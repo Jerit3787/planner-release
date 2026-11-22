@@ -221,12 +221,18 @@ jobs:
 
       - name: Install and launch the Windows installer
         if: ${{ matrix.os == 'windows' }}
+        timeout-minutes: 10
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $installer = Get-ChildItem dist -Filter '*-windows-x64-setup.exe' | Select-Object -First 1
           # A silent install starts Planner itself ([Run], Check: WizardSilent).
-          Start-Process -Wait -FilePath $installer.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          # Wait for the installer alone: Start-Process -Wait also waits for
+          # every process it starts, so it would wait on Planner forever.
+          $setup = Start-Process -PassThru -FilePath $installer.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          $null = $setup.Handle  # keeps ExitCode readable after it exits
+          if (-not $setup.WaitForExit(300000)) { throw 'the installer did not finish within 5 minutes' }
+          if ($setup.ExitCode -ne 0) { throw "the installer exited with $($setup.ExitCode)" }
           $exe = Join-Path $env:LOCALAPPDATA 'Programs\Stutastic Planner\planner.exe'
           if (-not (Test-Path $exe)) { throw "not installed at $exe" }
           $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Stutastic Planner.lnk'
