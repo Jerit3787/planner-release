@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Stutastic Planner
+Comment=Classes, deadlines and grades in one place
+Exec=stutastic-planner %U
+Icon=stutastic-planner
+Terminal=false
+Categories=Education;Office;
+StartupNotify=true
+StartupWMClass=com.danishstudioproduction.planner
