@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { buildManifest, PLATFORM_KEYS, rawPublicKey, sign, writeManifest } from '../../scripts/desktop/make-manifest.mjs';
+import {
+  assertNewer, buildManifest, PLATFORM_KEYS, rawPublicKey, sign, writeManifest,
+} from '../../scripts/desktop/make-manifest.mjs';
 
 // The Windows and Linux apps check desktop.json for updates and refuse any
 // file whose signature or checksum doesn't match (planner desktop design,
@@ -24,6 +26,7 @@ test('signature verifies over the exact file bytes', () => {
   const out = mkdtempSync(join(tmpdir(), 'manifest-'));
   writeManifest({
     version: '2.0.0',
+    build: 4601,
     notes: 'First desktop release',
     assets: { 'windows-x64': asset('https://example/x.exe') },
     keyBase64: pemBase64,
@@ -35,6 +38,7 @@ test('signature verifies over the exact file bytes', () => {
   assert.equal(verify(null, bytes, publicKey, signature), true);
   assert.deepEqual(JSON.parse(bytes), {
     version: '2.0.0',
+    build: 4601,
     notes: 'First desktop release',
     publishedAt: '2026-11-22T10:00:00.000Z',
     assets: { 'windows-x64': asset('https://example/x.exe') },
@@ -47,20 +51,20 @@ test('signature verifies over the exact file bytes', () => {
 
 test('refuses an unknown platform key', () => {
   assert.throws(
-    () => buildManifest({ version: '2.0.0', notes: '', assets: { 'mac-arm64': asset('u') } }),
+    () => buildManifest({ version: '2.0.0', build: 1, notes: '', assets: { 'mac-arm64': asset('u') } }),
     /unknown platform key: mac-arm64/,
   );
 });
 
 test('refuses a sha256 that is not 64 hex characters', () => {
   assert.throws(
-    () => buildManifest({ version: '2.0.0', notes: '', assets: { 'windows-x64': { url: 'u', sha256: 'abc' } } }),
+    () => buildManifest({ version: '2.0.0', build: 1, notes: '', assets: { 'windows-x64': { url: 'u', sha256: 'abc' } } }),
     /sha256/,
   );
 });
 
 test('refuses a version that is not x.y.z', () => {
-  assert.throws(() => buildManifest({ version: 'v2', notes: '', assets: {} }), /version/);
+  assert.throws(() => buildManifest({ version: 'v2', build: 1, notes: '', assets: {} }), /version/);
 });
 
 test('the platform keys are the five the app looks for', () => {
@@ -76,4 +80,27 @@ test('rawPublicKey gives the 32 bytes the app embeds', () => {
   const der = publicKey.export({ type: 'spki', format: 'der' });
   assert.deepEqual(raw, der.subarray(der.length - 32));
   assert.equal(typeof sign(Buffer.from('x'), pemBase64), 'string');
+});
+
+// Desktop builds carry Apple's build number, 3.0.0 (4601), so a rebuild of
+// the same version is still an update (desktop build numbers, 2026-11-23).
+test('refuses a build number that is not a positive whole number', () => {
+  for (const build of [undefined, 0, -1, 1.5, '12a']) {
+    assert.throws(() => buildManifest({ version: '3.0.0', build, notes: '', assets: {} }), /build/);
+  }
+  assert.equal(buildManifest({ version: '3.0.0', build: '4601', notes: '', assets: {} }).build, 4601);
+});
+
+test('a new manifest must be newer than the one on the channel', () => {
+  const next = { version: '3.0.0', build: 4601 };
+  assertNewer(null, next);
+  // No channel yet.
+  assertNewer({}, next);
+  // The first desktop release had no build number.
+  assertNewer({ version: '3.0.0' }, next);
+  assertNewer({ version: '3.0.0', build: 4501 }, next);
+  assertNewer({ version: '2.9.9', build: 9999 }, next);
+  assert.throws(() => assertNewer({ version: '3.0.0', build: 4601 }, next), /not newer/);
+  assert.throws(() => assertNewer({ version: '3.0.0', build: 4701 }, next), /not newer/);
+  assert.throws(() => assertNewer({ version: '3.0.1', build: 1 }, next), /not newer/);
 });

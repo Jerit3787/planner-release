@@ -25,6 +25,12 @@ cp "$here/stutastic-planner.desktop" "$root/usr/share/applications/"
 cp "$bundle/data/app_icon.png" "$root/usr/share/pixmaps/stutastic-planner.png"
 
 size="$(du -sk "$root" | cut -f1)"
+# tray_manager 0.5's plugin needs libayatana at run time; 0.9 (nativeapi)
+# doesn't, and GTK 3 already brings X11 and Xi.
+depends='libgtk-3-0 | libgtk-3-0t64, libsecret-1-0'
+if [ -f "$bundle/lib/libtray_manager_plugin.so" ]; then
+  depends="$depends, libayatana-appindicator3-1"
+fi
 cat > "$root/DEBIAN/control" <<CONTROL
 Package: stutastic-planner
 Version: $version
@@ -32,7 +38,7 @@ Section: education
 Priority: optional
 Architecture: $deb_arch
 Installed-Size: $size
-Depends: libgtk-3-0 | libgtk-3-0t64, libsecret-1-0, libayatana-appindicator3-1
+Depends: $depends
 Maintainer: DanPlace
 Homepage: https://docs.planner.danplace.tech
 Description: Stutastic Planner

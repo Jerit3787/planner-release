@@ -1,7 +1,7 @@
 ; Windows installer for the Flutter desktop app (planner desktop design,
 ; 2026-11-22). Built by .github/workflows/desktop.yml:
 ;
-;   ISCC /DAppVersion=3.0.0 /DBuildDir=<bundle> /DIconFile=<ico> /DOutputDir=dist planner.iss
+;   ISCC /DAppVersion=3.0.0 /DBuildNumber=4601 /DBuildDir=<bundle> /DIconFile=<ico> /DOutputDir=dist planner.iss
 ;
 ; Per-user, so it installs and updates without an administrator. Its names
 ; differ from the old Tauri app's ("Student Planner"), so both can be
@@ -9,12 +9,17 @@
 #ifndef AppVersion
   #error AppVersion is required
 #endif
+#ifndef BuildNumber
+  #error BuildNumber is required
+#endif
 
 [Setup]
 ; Fixed for the life of the app: Windows ties upgrades and uninstall to it.
 AppId={{1E41379D-EE7D-4EC3-964E-5E3B98DD729E}
 AppName=Stutastic Planner
-AppVersion={#AppVersion}
+; Windows lists it as 3.0.0.4601; the installer says 3.0.0 (4601).
+AppVersion={#AppVersion}.{#BuildNumber}
+AppVerName=Stutastic Planner {#AppVersion} ({#BuildNumber})
 AppPublisher=DanPlace
 AppPublisherURL=https://docs.planner.danplace.tech
 DefaultDirName={localappdata}\Programs\Stutastic Planner
@@ -24,7 +29,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
-OutputBaseFilename=stutastic-planner-{#AppVersion}-windows-x64-setup
+OutputBaseFilename=stutastic-planner-{#AppVersion}-{#BuildNumber}-windows-x64-setup
 SetupIconFile={#IconFile}
 UninstallDisplayIcon={app}\planner.exe
 UninstallDisplayName=Stutastic Planner
