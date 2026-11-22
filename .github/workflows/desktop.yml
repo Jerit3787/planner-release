@@ -69,8 +69,11 @@ jobs:
 
       - name: Check the build settings are present
         shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::source_sha must be a full 40-character commit.'; exit 1; }
           for name in POWERSYNC_URL WORKER_URL GOOGLE_DESKTOP_CLIENT_ID PLANNER_APPLE_SERVICES_ID; do
             [ -n "${!name}" ] || { echo "::error::Repository variable $name is not set."; exit 1; }
           done
@@ -174,8 +177,16 @@ jobs:
           APP_VERSION: ${{ steps.version.outputs.app_version }}
         run: |
           $ErrorActionPreference = 'Stop'
-          choco install innosetup --no-progress -y
-          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          # Pinned and checked against the digest GitHub records for the
+          # release asset: this builds the file the signed manifest vouches for.
+          $setup = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.4.exe'
+          Invoke-WebRequest -UseBasicParsing -OutFile $setup 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe'
+          $sha = (Get-FileHash -Algorithm SHA256 $setup).Hash.ToLower()
+          if ($sha -ne 'a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c') { throw "Inno Setup checksum mismatch: $sha" }
+          $inno = Join-Path $env:RUNNER_TEMP 'inno'
+          Start-Process -Wait -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=$inno"
+          $iscc = Join-Path $inno 'ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw 'ISCC.exe was not installed' }
           $bundle = Resolve-Path 'planner/app/build/windows/x64/runner/Release'
           $icon = Resolve-Path 'planner/app/windows/runner/resources/app_icon.ico'
           New-Item -ItemType Directory -Force dist | Out-Null
@@ -192,6 +203,39 @@ jobs:
           bundle="planner/app/build/linux/${{ matrix.arch }}/release/bundle"
           bash scripts/desktop/build-appimage.sh "$bundle" "$APP_VERSION" ${{ matrix.arch }} dist
           bash scripts/desktop/build-deb.sh "$bundle" "$APP_VERSION" ${{ matrix.arch }} dist
+
+      # The smoke test ran a debug build; these start what actually ships.
+      - name: Launch the packaged AppImage and .deb
+        if: ${{ matrix.os == 'linux' }}
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          appimage="dist/stutastic-planner-$APP_VERSION-linux-${{ matrix.arch }}.AppImage"
+          chmod 755 "$appimage"
+          # No FUSE on the runner.
+          APPIMAGE_EXTRACT_AND_RUN=1 bash scripts/desktop/launch-check.sh "$appimage"
+          sudo apt-get install -y ./dist/stutastic-planner_*.deb
+          bash scripts/desktop/launch-check.sh stutastic-planner
+
+      - name: Install and launch the Windows installer
+        if: ${{ matrix.os == 'windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-ChildItem dist -Filter '*-windows-x64-setup.exe' | Select-Object -First 1
+          # A silent install starts Planner itself ([Run], Check: WizardSilent).
+          Start-Process -Wait -FilePath $installer.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\Stutastic Planner\planner.exe'
+          if (-not (Test-Path $exe)) { throw "not installed at $exe" }
+          $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Stutastic Planner.lnk'
+          if (-not (Test-Path $shortcut)) { throw "no Start-menu shortcut at $shortcut" }
+          Start-Sleep -Seconds 20
+          $running = Get-Process -Name planner -ErrorAction SilentlyContinue
+          if (-not $running) { throw 'Planner was not running 20 seconds after a silent install' }
+          Write-Host "Still running after 20 seconds: $exe"
+          $running | Stop-Process -Force
 
       - name: Upload the packages
         uses: actions/upload-artifact@v7
