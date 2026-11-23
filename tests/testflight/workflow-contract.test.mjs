@@ -40,9 +40,26 @@ describe('TestFlight publishing workflow contract', () => {
     );
     const desktop = parsedPublishingWorkflow.jobs.desktop;
     assert.ok(desktop, 'missing desktop job');
-    assert.deepEqual(desktop.needs, ['verify-source', 'validate-production-policy']);
+    assert.deepEqual(desktop.needs, [
+      'verify-source',
+      'validate-production-policy',
+      'flutter-lint',
+      'flutter-tests',
+    ]);
     assert.match(desktop.if, /github\.ref == 'refs\/heads\/main'/);
     assert.match(desktop.if, /inputs\.desktop_notes != ''/);
+    // The gate jobs skip when the private run was verified, and a skipped
+    // need would skip desktop too, so its condition names every outcome.
+    assert.match(desktop.if, /^\$\{\{ !cancelled\(\) && /);
+    assert.match(desktop.if, /needs\.validate-production-policy\.result == 'success'/);
+    assert.match(
+      desktop.if,
+      /\(needs\.flutter-lint\.result == 'success' && needs\.flutter-tests\.result == 'success'\)/,
+    );
+    assert.match(
+      desktop.if,
+      /\(!inputs\.local_verification && needs\.flutter-lint\.result == 'skipped' && needs\.flutter-tests\.result == 'skipped'\)/,
+    );
     assert.deepEqual(desktop.permissions, { actions: 'write', contents: 'read' });
     const script = desktop.steps.map((step) => step.run ?? '').join('\n');
     assert.match(
@@ -92,46 +109,72 @@ describe('TestFlight publishing workflow contract', () => {
     assert.match(buildUpload, /if:\s*\$\{\{\s*github\.ref == 'refs\/heads\/main'\s*\}\}/);
   });
 
-  it('can run the Flutter gate here when the private run is unavailable', () => {
+  it('can run the Flutter gate here, in its own jobs, when the private run is unavailable', () => {
     const verifyStep = parsedPublishingWorkflow.jobs['verify-source'].steps.find(
       (step) => step.name === 'Verify the exact private source run and required checks',
     );
     assert.ok(verifyStep, 'the private source verification step must exist');
     assert.equal(verifyStep.if, '${{ !inputs.local_verification }}');
 
-    const policySteps = parsedPublishingWorkflow.jobs['validate-production-policy'].steps;
-    const flutterSetup = policySteps.find(
-      (step) => step.name === 'Set up Flutter 3.50.1 for the local gate',
-    );
-    assert.ok(flutterSetup, 'the local Flutter setup step must exist');
-    assert.equal(flutterSetup.if, '${{ inputs.local_verification }}');
-    assert.equal(flutterSetup.with['flutter-version'], '3.50.1');
+    for (const id of ['flutter-lint', 'flutter-tests']) {
+      const job = parsedPublishingWorkflow.jobs[id];
+      assert.ok(job, `missing job ${id}`);
+      assert.equal(job.needs, 'verify-source');
+      assert.equal(job.if, "${{ github.ref == 'refs/heads/main' && inputs.local_verification }}");
+      assert.equal(job['runs-on'], 'ubuntu-latest');
+      assert.equal(job.environment, undefined, `${id} must not see the testflight environment`);
 
-    const gate = policySteps.find((step) => step.name === 'Run the Flutter gate locally');
-    assert.ok(gate, 'the local Flutter gate must exist');
-    assert.equal(gate.if, '${{ inputs.local_verification }}');
-    assert.equal(gate['working-directory'], 'planner/app');
+      const checkout = job.steps.find((step) => step.with?.repository === 'Jerit3787/planner');
+      assert.ok(checkout, `${id} must check out the private planner revision`);
+      assert.equal(checkout.with.ref, '${{ inputs.source_sha }}');
+      assert.equal(checkout.with.token, '${{ secrets.PLANNER_PAT }}');
+      assert.equal(checkout.with['persist-credentials'], false);
+
+      const flutterSetup = job.steps.find((step) => step.uses === 'subosito/flutter-action@v2.23.0');
+      assert.ok(flutterSetup, `${id} must set up Flutter`);
+      assert.equal(flutterSetup.with['flutter-version'], '3.50.1');
+      assert.equal(flutterSetup.with.cache, true);
+
+      // tray_manager 0.9 / window_manager 0.7 build cnativeapi for the host
+      // during flutter test, and on Linux that needs GTK 3, X11 and Xi.
+      const libsIndex = job.steps.findIndex(
+        (step) => step.name === 'Install the Linux libraries the desktop plugins build against',
+      );
+      assert.ok(libsIndex >= 0, `${id} must install the desktop plugins' Linux libraries`);
+      for (const pkg of ['libgtk-3-dev', 'libx11-dev', 'libxi-dev']) {
+        assert.match(job.steps[libsIndex].run, new RegExp(pkg));
+      }
+      const gateIndex = job.steps.findIndex((step) => /\bflutter\b/.test(step.run ?? ''));
+      assert.ok(gateIndex > libsIndex, `${id} installs the libraries before Flutter runs`);
+      assert.equal(job.steps[gateIndex]['working-directory'], 'planner/app');
+    }
+
+    const lint = parsedPublishingWorkflow.jobs['flutter-lint'];
+    assert.equal(lint.name, 'Flutter lint');
+    const lintScript = lint.steps.map((step) => step.run ?? '').join('\n');
     for (const command of [
       /flutter pub get/,
-      /dart format --output=none --set-exit-if-changed/,
+      /dart format --output=none --set-exit-if-changed lib test test_driver integration_test tool/,
       /flutter analyze/,
-      /flutter test --concurrency=1/,
     ]) {
-      assert.match(gate.run, command);
+      assert.match(lintScript, command);
     }
+    assert.doesNotMatch(lintScript, /flutter test/);
 
-    // tray_manager 0.9 / window_manager 0.7 build cnativeapi for the host
-    // during flutter test, and on Linux that needs GTK 3, X11 and Xi.
-    const libsIndex = policySteps.findIndex(
-      (step) => step.name === 'Install the Linux libraries the desktop plugins build against',
+    const tests = parsedPublishingWorkflow.jobs['flutter-tests'];
+    assert.equal(tests.name, 'Flutter tests (shard ${{ matrix.shard }} of 4)');
+    assert.deepEqual(tests.strategy.matrix.shard, [0, 1, 2, 3]);
+    assert.equal(tests.strategy['fail-fast'], false);
+    const testScript = tests.steps.map((step) => step.run ?? '').join('\n');
+    assert.match(
+      testScript,
+      /flutter test --concurrency=1 --total-shards=4 --shard-index=\$\{\{ matrix\.shard \}\}/,
     );
-    assert.ok(libsIndex >= 0, 'the local gate must install the desktop plugins\' Linux libraries');
-    const libs = policySteps[libsIndex];
-    assert.equal(libs.if, '${{ inputs.local_verification }}');
-    for (const pkg of ['libgtk-3-dev', 'libx11-dev', 'libxi-dev']) {
-      assert.match(libs.run, new RegExp(pkg));
-    }
-    assert.ok(libsIndex < policySteps.indexOf(gate), 'the libraries come before the gate');
+
+    // Policy is a sub-second check and gates signing; the test gate is not.
+    const policySteps = parsedPublishingWorkflow.jobs['validate-production-policy'].steps;
+    assert.ok(!policySteps.some((step) => /flutter-action/.test(step.uses ?? '')));
+    assert.ok(!policySteps.some((step) => /\bflutter\b/.test(step.run ?? '')));
   });
 
   it('enables the pinned Flutter action cache for the SDK and pub dependencies', () => {
@@ -227,7 +270,7 @@ describe('TestFlight publishing workflow contract', () => {
     assert.match(buildUpload, /token:\s*\$\{\{\s*secrets\.PLANNER_PAT\s*\}\}/);
     assert.equal(
       [...publishingWorkflow.matchAll(/secrets\.PLANNER_PAT/g)].length,
-      3,
+      5,
       'the private PAT must only be used for source metadata and source checkouts',
     );
 
