@@ -166,36 +166,6 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Set up Flutter 3.50.1 for the local gate
-        if: ${{ inputs.local_verification }}
-        uses: subosito/flutter-action@v2.23.0
-        with:
-          channel: stable
-          flutter-version: '3.50.1'
-          cache: true
-
-      # tray_manager 0.9 and window_manager 0.7 build cnativeapi for the host
-      # whenever flutter test runs, and on Linux it links GTK 3, X11 and Xi.
-      - name: Install the Linux libraries the desktop plugins build against
-        if: ${{ inputs.local_verification }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libgtk-3-dev libx11-dev libxi-dev
-
-      - name: Run the Flutter gate locally
-        if: ${{ inputs.local_verification }}
-        working-directory: planner/app
-        shell: bash
-        run: |
-          set -euo pipefail
-          flutter pub get
-          dart format --output=none --set-exit-if-changed lib test test_driver integration_test tool
-          flutter analyze
-          flutter test --concurrency=1
-
       - name: Validate production release policies
         working-directory: planner
         shell: bash
@@ -207,15 +177,106 @@ jobs:
           node tools/release/release-policy.mjs --environment prod --target ios
           node tools/release/release-policy.mjs --environment prod --target macos
 
+  # The Flutter gate for local verification runs beside Apple signing, not
+  # in front of it: build-upload builds straight away and waits for these
+  # jobs before it uploads. Each shard keeps --concurrency=1.
+  flutter-lint:
+    name: Flutter lint
+    if: ${{ github.ref == 'refs/heads/main' && inputs.local_verification }}
+    needs: verify-source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the tested private planner revision
+        uses: actions/checkout@v7
+        with:
+          repository: Jerit3787/planner
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.PLANNER_PAT }}
+          path: planner
+          persist-credentials: false
+
+      - name: Set up Flutter 3.50.1
+        uses: subosito/flutter-action@v2.23.0
+        with:
+          channel: stable
+          flutter-version: '3.50.1'
+          cache: true
+
+      # tray_manager 0.9 and window_manager 0.7 build cnativeapi for the host
+      # whenever flutter test runs, and on Linux it links GTK 3, X11 and Xi.
+      - name: Install the Linux libraries the desktop plugins build against
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libgtk-3-dev libx11-dev libxi-dev
+
+      - name: Check formatting and analysis
+        working-directory: planner/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter pub get
+          dart format --output=none --set-exit-if-changed lib test test_driver integration_test tool
+          flutter analyze
+
+  flutter-tests:
+    name: Flutter tests (shard ${{ matrix.shard }} of 4)
+    if: ${{ github.ref == 'refs/heads/main' && inputs.local_verification }}
+    needs: verify-source
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - name: Checkout the tested private planner revision
+        uses: actions/checkout@v7
+        with:
+          repository: Jerit3787/planner
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.PLANNER_PAT }}
+          path: planner
+          persist-credentials: false
+
+      - name: Set up Flutter 3.50.1
+        uses: subosito/flutter-action@v2.23.0
+        with:
+          channel: stable
+          flutter-version: '3.50.1'
+          cache: true
+
+      # tray_manager 0.9 and window_manager 0.7 build cnativeapi for the host
+      # whenever flutter test runs, and on Linux it links GTK 3, X11 and Xi.
+      - name: Install the Linux libraries the desktop plugins build against
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libgtk-3-dev libx11-dev libxi-dev
+
+      - name: Run this shard of the Flutter tests
+        working-directory: planner/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter pub get
+          flutter test --concurrency=1 --total-shards=4 --shard-index=${{ matrix.shard }}
+
   # Windows and Linux get this run's build number, so 3.0.0 (4601) is the
   # same source everywhere (desktop build numbers, 2026-11-23). desktop.yml
-  # builds, smoke-tests and publishes them; it starts once the source gate
-  # has passed, alongside the Apple signing.
+  # builds, smoke-tests and publishes them; it starts once policy and the
+  # Flutter gate have passed (or the gate was skipped because the private
+  # run was verified).
   desktop:
-    if: ${{ github.ref == 'refs/heads/main' && inputs.desktop_notes != '' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && inputs.desktop_notes != '' && needs.validate-production-policy.result == 'success' && ((needs.flutter-lint.result == 'success' && needs.flutter-tests.result == 'success') || (!inputs.local_verification && needs.flutter-lint.result == 'skipped' && needs.flutter-tests.result == 'skipped')) }}
     needs:
       - verify-source
       - validate-production-policy
+      - flutter-lint
+      - flutter-tests
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -248,6 +309,10 @@ jobs:
             -f "inputs[notes]=$NOTES"
           echo "Started desktop.yml for 3.0.0 ($BUILD_NUMBER) from ${SOURCE_SHA:0:12}." >> "$GITHUB_STEP_SUMMARY"
 
+  # iOS and macOS build on their own runners at the same time. Each leg
+  # signs, builds and then, for local verification, waits for the Flutter
+  # gate jobs of this run before it uploads. Nothing signed leaves the
+  # runner: this repository is public, so no run files are used.
   build-upload:
     if: ${{ github.ref == 'refs/heads/main' }}
     needs:
@@ -255,6 +320,13 @@ jobs:
       - validate-production-policy
     runs-on: macos-26-intel
     environment: testflight
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ios, macos]
     steps:
       - name: Checkout the public release repository
         uses: actions/checkout@v7
@@ -286,9 +358,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/Library/Caches/org.swift.swiftpm
-          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-${{ hashFiles('planner/app/**/Package.resolved') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-${{ matrix.platform }}-${{ hashFiles('planner/app/**/Package.resolved') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-${{ matrix.platform }}-
 
       - name: Check Xcode and App Store uploader support
         shell: bash
@@ -481,6 +553,7 @@ jobs:
         run: flutter pub get
 
       - name: Build the iOS/iPadOS TestFlight IPA
+        if: ${{ matrix.platform == 'ios' }}
         working-directory: planner/app
         shell: bash
         env:
@@ -500,6 +573,7 @@ jobs:
             --export-options-plist=ios/ExportOptions.testflight.plist
 
       - name: Generate Flutter macOS archive configuration
+        if: ${{ matrix.platform == 'macos' }}
         working-directory: planner/app
         shell: bash
         env:
@@ -522,6 +596,7 @@ jobs:
             --dart-define="GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID"
 
       - name: Archive and export the macOS TestFlight package
+        if: ${{ matrix.platform == 'macos' }}
         working-directory: planner/app
         shell: bash
         env:
@@ -556,41 +631,83 @@ jobs:
             -exportOptionsPlist "$GITHUB_WORKSPACE/planner/app/macos/ExportOptions.testflight.plist" \
             -exportPath "$RUNNER_TEMP/macos-export"
 
-      - name: Locate the iOS/iPadOS IPA and macOS package
+      - name: Locate the built IPA or macOS package
         id: artifacts
         working-directory: planner/app
         shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
 
-          ipas=()
-          while IFS= read -r file; do
-            ipas+=("$file")
-          done < <(find build/ios/ipa -maxdepth 1 -type f -name '*.ipa' -print)
+          files=()
+          if [[ "$PLATFORM" == 'ios' ]]; then
+            while IFS= read -r file; do
+              files+=("$GITHUB_WORKSPACE/planner/app/$file")
+            done < <(find build/ios/ipa -maxdepth 1 -type f -name '*.ipa' -print)
+          else
+            while IFS= read -r file; do
+              files+=("$file")
+            done < <(find "$RUNNER_TEMP/macos-export" -maxdepth 1 -type f -name '*.pkg' -print)
+          fi
 
-          packages=()
-          while IFS= read -r file; do
-            packages+=("$file")
-          done < <(find "$RUNNER_TEMP/macos-export" -maxdepth 1 -type f -name '*.pkg' -print)
-
-          if (( ${#ipas[@]} != 1 || ${#packages[@]} != 1 )); then
-            echo '::error::Expected exactly one IPA and one macOS package; no upload was attempted.'
+          if (( ${#files[@]} != 1 )); then
+            echo "::error::Expected exactly one $PLATFORM upload file; no upload was attempted."
             exit 1
           fi
 
-          {
-            echo "ipa=$GITHUB_WORKSPACE/planner/app/${ipas[0]}"
-            echo "macos_pkg=${packages[0]}"
-          } >> "$GITHUB_OUTPUT"
+          echo "file=${files[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload iOS/iPadOS and macOS to TestFlight
-        id: uploads
+      # The gate jobs run beside this one (local verification only). Upload
+      # only once lint and all four shards succeeded; a failed, cancelled or
+      # skipped gate job, or no answer within an hour, stops this leg.
+      - name: Wait for the Flutter gate
+        if: ${{ inputs.local_verification }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          deadline=$((SECONDS + 3600))
+          while true; do
+            status=''
+            if gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+              > "$RUNNER_TEMP/flutter-gate-jobs.json" 2>/dev/null; then
+              status="$(node scripts/testflight/gate-status.mjs < "$RUNNER_TEMP/flutter-gate-jobs.json" 2>/dev/null)" || status=''
+              [[ -n "$status" ]] || echo "::warning::Could not read the gate status from this run's jobs."
+            else
+              echo "::warning::Could not read this run's gate jobs (gh exit $?)."
+            fi
+
+            case "$status" in
+              passed)
+                echo 'The Flutter gate passed.'
+                exit 0
+                ;;
+              failed)
+                echo '::error::The Flutter gate failed; nothing was uploaded.'
+                exit 1
+                ;;
+            esac
+
+            if (( SECONDS >= deadline )); then
+              echo '::error::Timed out waiting for the Flutter gate; nothing was uploaded.'
+              exit 1
+            fi
+            sleep 30
+          done
+
+      - name: Upload iOS/iPadOS to TestFlight
+        if: ${{ matrix.platform == 'ios' }}
+        id: upload-ios
         shell: bash
         env:
           TESTFLIGHT_APPLE_ID: ${{ secrets.TESTFLIGHT_APPLE_ID }}
           TESTFLIGHT_APP_SPECIFIC_PASSWORD: ${{ secrets.TESTFLIGHT_APP_SPECIFIC_PASSWORD }}
-          IOS_IPA: ${{ steps.artifacts.outputs.ipa }}
-          MACOS_PKG: ${{ steps.artifacts.outputs.macos_pkg }}
+          UPLOAD_FILE: ${{ steps.artifacts.outputs.file }}
           APP_VERSION: ${{ steps.build-metadata.outputs.app_version }}
           BUILD_NUMBER: ${{ steps.build-metadata.outputs.build_number }}
           SOURCE_SHA: ${{ steps.build-metadata.outputs.source_sha }}
@@ -604,10 +721,8 @@ jobs:
           fi
 
           IOS_UPLOAD_STATUS='failed'
-          MACOS_UPLOAD_STATUS='failed'
-
           if xcrun altool --upload-app \
-            -f "$IOS_IPA" \
+            -f "$UPLOAD_FILE" \
             -t ios \
             -u "$TESTFLIGHT_APPLE_ID" \
             -p @env:TESTFLIGHT_APP_SPECIFIC_PASSWORD \
@@ -618,8 +733,44 @@ jobs:
             echo '::error::The iOS/iPadOS upload failed; Apple response details were suppressed.'
           fi
 
+          echo "iOS/iPadOS upload result: $IOS_UPLOAD_STATUS"
+          echo "upload_status=$IOS_UPLOAD_STATUS" >> "$GITHUB_OUTPUT"
+          {
+            echo '## TestFlight upload result: iOS/iPadOS'
+            echo
+            echo "- Source SHA: \`$SOURCE_SHA\`"
+            echo "- App version: \`$APP_VERSION\`"
+            echo "- Shared build number: \`$BUILD_NUMBER\`"
+            echo "- iOS/iPadOS: **$IOS_UPLOAD_STATUS**"
+            echo
+            echo 'Upload acceptance is not the same as completed Apple processing or PE Personal availability.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [[ "$IOS_UPLOAD_STATUS" == 'accepted for processing' ]]
+
+      - name: Upload macOS to TestFlight
+        if: ${{ matrix.platform == 'macos' }}
+        id: upload-macos
+        shell: bash
+        env:
+          TESTFLIGHT_APPLE_ID: ${{ secrets.TESTFLIGHT_APPLE_ID }}
+          TESTFLIGHT_APP_SPECIFIC_PASSWORD: ${{ secrets.TESTFLIGHT_APP_SPECIFIC_PASSWORD }}
+          UPLOAD_FILE: ${{ steps.artifacts.outputs.file }}
+          APP_VERSION: ${{ steps.build-metadata.outputs.app_version }}
+          BUILD_NUMBER: ${{ steps.build-metadata.outputs.build_number }}
+          SOURCE_SHA: ${{ steps.build-metadata.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          set +x
+
+          if [[ -z "$TESTFLIGHT_APPLE_ID" || -z "$TESTFLIGHT_APP_SPECIFIC_PASSWORD" ]]; then
+            echo '::error::One or more required App Store Connect credentials are missing.'
+            exit 1
+          fi
+
+          MACOS_UPLOAD_STATUS='failed'
           if xcrun altool --upload-app \
-            -f "$MACOS_PKG" \
+            -f "$UPLOAD_FILE" \
             -t macos \
             -u "$TESTFLIGHT_APPLE_ID" \
             -p @env:TESTFLIGHT_APP_SPECIFIC_PASSWORD \
@@ -630,29 +781,20 @@ jobs:
             echo '::error::The macOS upload failed; Apple response details were suppressed.'
           fi
 
+          echo "macOS upload result: $MACOS_UPLOAD_STATUS"
+          echo "upload_status=$MACOS_UPLOAD_STATUS" >> "$GITHUB_OUTPUT"
           {
-            echo "iOS/iPadOS upload result: $IOS_UPLOAD_STATUS"
-            echo "macOS upload result: $MACOS_UPLOAD_STATUS"
-            echo "ios_upload_status=$IOS_UPLOAD_STATUS" >> "$GITHUB_OUTPUT"
-            echo "macos_upload_status=$MACOS_UPLOAD_STATUS" >> "$GITHUB_OUTPUT"
-          }
-
-          {
-            echo '## TestFlight upload results'
+            echo '## TestFlight upload result: macOS'
             echo
             echo "- Source SHA: \`$SOURCE_SHA\`"
             echo "- App version: \`$APP_VERSION\`"
             echo "- Shared build number: \`$BUILD_NUMBER\`"
-            echo "- iOS/iPadOS: **$IOS_UPLOAD_STATUS**"
             echo "- macOS: **$MACOS_UPLOAD_STATUS**"
             echo
             echo 'Upload acceptance is not the same as completed Apple processing or PE Personal availability.'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [[ "$IOS_UPLOAD_STATUS" != 'accepted for processing' || \
-                "$MACOS_UPLOAD_STATUS" != 'accepted for processing' ]]; then
-            exit 1
-          fi
+          [[ "$MACOS_UPLOAD_STATUS" == 'accepted for processing' ]]
 
       - name: Remove temporary signing material and build output
         if: always()
@@ -717,6 +859,7 @@ jobs:
             "$RUNNER_TEMP/testflight-ios-widget-profile-uuid.txt" \
             "$RUNNER_TEMP/testflight-macos-profile-uuid.txt" \
             "$RUNNER_TEMP/testflight-altool-help.txt" \
+            "$RUNNER_TEMP/flutter-gate-jobs.json" \
             "$RUNNER_TEMP/ios-upload.log" \
             "$RUNNER_TEMP/macos-upload.log"
           /bin/rm -rf \
