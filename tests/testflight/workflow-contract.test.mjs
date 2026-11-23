@@ -219,7 +219,9 @@ describe('TestFlight publishing workflow contract', () => {
 
   it('validates the exact source run before the Apple environment can start', () => {
     assert.match(verifySource, /runs-on:\s*ubuntu-latest/);
-    assert.match(buildUpload, /runs-on:\s*macos-26-intel/);
+    // Apple silicon: the macOS leg (41 min on Intel in trial 1) is the
+    // critical path, and the macOS package is universal either way.
+    assert.match(buildUpload, /runs-on:\s*macos-26\s*$/m);
     assert.match(buildUpload, /needs:\s*-\s*verify-source/);
     assert.match(buildUpload, /environment:\s*testflight/);
     assert.doesNotMatch(verifySource, /environment:\s*testflight/);

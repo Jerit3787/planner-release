@@ -318,7 +318,7 @@ jobs:
     needs:
       - verify-source
       - validate-production-policy
-    runs-on: macos-26-intel
+    runs-on: macos-26
     environment: testflight
     permissions:
       actions: read
