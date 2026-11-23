@@ -201,11 +201,11 @@ describe('TestFlight publishing workflow contract', () => {
     assert.equal(cacheStep.with.path, '~/Library/Caches/org.swift.swiftpm');
     assert.match(
       cacheStep.with.key,
-      /^\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-swiftpm-\$\{\{ hashFiles\('planner\/app\/\*\*\/Package\.resolved'\) \}\}$/,
+      /^\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-swiftpm-\$\{\{ matrix\.platform \}\}-\$\{\{ hashFiles\('planner\/app\/\*\*\/Package\.resolved'\) \}\}$/,
     );
     assert.match(
       cacheStep.with['restore-keys'],
-      /^\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-swiftpm-\n?$/,
+      /^\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-swiftpm-\$\{\{ matrix\.platform \}\}-\n?$/,
     );
 
     for (const buildName of [
@@ -552,7 +552,7 @@ describe('TestFlight publishing workflow contract', () => {
     });
 
     // Runs the step's own script with a stand-in gh and a sleep that only
-    // advances bash's clock, so the deadline can pass in milliseconds.
+    // advances bash's clock (ten minutes a poll), so the hour passes at once.
     function runWait(ghScript) {
       const dir = mkdtempSync(join(tmpdir(), 'gate-wait-'));
       try {
@@ -561,7 +561,7 @@ describe('TestFlight publishing workflow contract', () => {
         chmodSync(gh, 0o755);
         return spawnSync(
           'bash',
-          ['-c', `sleep() { SECONDS=$((SECONDS + $1)); }\n${wait.run}`],
+          ['-c', `sleep() { SECONDS=$((SECONDS + 600)); }\n${wait.run}`],
           {
             encoding: 'utf8',
             env: {
@@ -606,10 +606,17 @@ describe('TestFlight publishing workflow contract', () => {
       assert.match(result.stdout, /::error::Timed out waiting for the Flutter gate/);
     });
 
-    it('keeps waiting through API errors and still times out', () => {
-      const result = runWait('exit 1');
+    it('keeps waiting through API errors, saying so, and still times out', () => {
+      const result = runWait('exit 4');
       assert.equal(result.status, 1);
+      assert.match(result.stdout, /::warning::Could not read this run's gate jobs \(gh exit 4\)/);
       assert.match(result.stdout, /::error::Timed out waiting for the Flutter gate/);
+    });
+
+    it('says so when the jobs response cannot be read', () => {
+      const result = runWait("echo 'not json'");
+      assert.equal(result.status, 1);
+      assert.match(result.stdout, /::warning::Could not read the gate status from this run's jobs/);
     });
   });
 

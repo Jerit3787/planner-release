@@ -358,9 +358,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/Library/Caches/org.swift.swiftpm
-          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-${{ hashFiles('planner/app/**/Package.resolved') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-swiftpm-${{ matrix.platform }}-${{ hashFiles('planner/app/**/Package.resolved') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-swiftpm-
+            ${{ runner.os }}-${{ runner.arch }}-swiftpm-${{ matrix.platform }}-
 
       - name: Check Xcode and App Store uploader support
         shell: bash
@@ -676,7 +676,10 @@ jobs:
               -H 'Accept: application/vnd.github+json' \
               "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
               > "$RUNNER_TEMP/flutter-gate-jobs.json" 2>/dev/null; then
-              status="$(node scripts/testflight/gate-status.mjs < "$RUNNER_TEMP/flutter-gate-jobs.json" || true)"
+              status="$(node scripts/testflight/gate-status.mjs < "$RUNNER_TEMP/flutter-gate-jobs.json" 2>/dev/null)" || status=''
+              [[ -n "$status" ]] || echo "::warning::Could not read the gate status from this run's jobs."
+            else
+              echo "::warning::Could not read this run's gate jobs (gh exit $?)."
             fi
 
             case "$status" in
