@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 const publishingWorkflow = readFileSync('.github/workflows/testflight.yml', 'utf8');
@@ -464,15 +466,151 @@ describe('TestFlight publishing workflow contract', () => {
     assert.match(buildUpload, /-p @env:TESTFLIGHT_APP_SPECIFIC_PASSWORD/);
     assert.match(buildUpload, /CURRENT_PROJECT_VERSION="\$BUILD_NUMBER"/);
 
-    const ipaCheck = buildUpload.indexOf('ipas=()');
-    const packageCheck = buildUpload.indexOf('packages=()');
-    const iosUpload = buildUpload.indexOf('if xcrun altool --upload-app');
-    const macUpload = buildUpload.indexOf('if xcrun altool --upload-app', iosUpload + 1);
-    assert.ok(ipaCheck >= 0 && packageCheck > ipaCheck);
-    assert.ok(iosUpload > packageCheck && macUpload > iosUpload);
-    assert.ok(buildUpload.indexOf('-t ios', iosUpload) < macUpload);
-    assert.ok(buildUpload.indexOf('-t macos', macUpload) > macUpload);
     assert.match(buildUpload, /--build-number\s+"\$BUILD_NUMBER"/);
+    // Both legs compute the number the same way, from the same run/attempt.
+    assert.equal([...buildUpload.matchAll(/scripts\/testflight\/build-number\.mjs/g)].length, 1);
+
+    const steps = parsedPublishingWorkflow.jobs['build-upload'].steps;
+    const step = (name) => steps.find((candidate) => candidate.name === name);
+    const locate = step('Locate the built IPA or macOS package');
+    assert.ok(locate, 'the locate step must exist');
+    assert.equal(locate.id, 'artifacts');
+    assert.match(locate.run, /find build\/ios\/ipa -maxdepth 1 -type f -name '\*\.ipa'/);
+    assert.match(locate.run, /find "\$RUNNER_TEMP\/macos-export" -maxdepth 1 -type f -name '\*\.pkg'/);
+    assert.match(locate.run, /\(\( \$\{#files\[@\]\} != 1 \)\)/);
+
+    for (const [name, type, other] of [
+      ['Upload iOS/iPadOS to TestFlight', 'ios', 'macos'],
+      ['Upload macOS to TestFlight', 'macos', 'ios'],
+    ]) {
+      const upload = step(name);
+      assert.ok(upload, `missing ${name}`);
+      assert.equal(upload.env.UPLOAD_FILE, '${{ steps.artifacts.outputs.file }}');
+      assert.match(upload.run, new RegExp(`-f "\\$UPLOAD_FILE" \\\\\\s*\\n\\s*-t ${type} `));
+      assert.doesNotMatch(upload.run, new RegExp(`-t ${other}\\b`));
+      assert.match(upload.run, /-p @env:TESTFLIGHT_APP_SPECIFIC_PASSWORD/);
+      assert.match(upload.run, /GITHUB_STEP_SUMMARY/);
+    }
+  });
+
+  it('builds iOS and macOS as parallel legs that each sign and upload their own platform', () => {
+    const job = parsedPublishingWorkflow.jobs['build-upload'];
+    assert.deepEqual(job.strategy.matrix.platform, ['ios', 'macos']);
+    assert.equal(job.strategy['fail-fast'], false);
+    assert.deepEqual(job.permissions, { actions: 'read', contents: 'read' });
+    assert.deepEqual(job.needs, ['verify-source', 'validate-production-policy']);
+
+    const step = (name) => job.steps.find((candidate) => candidate.name === name);
+    for (const [name, platform] of [
+      ['Build the iOS/iPadOS TestFlight IPA', 'ios'],
+      ['Upload iOS/iPadOS to TestFlight', 'ios'],
+      ['Generate Flutter macOS archive configuration', 'macos'],
+      ['Archive and export the macOS TestFlight package', 'macos'],
+      ['Upload macOS to TestFlight', 'macos'],
+    ]) {
+      assert.equal(step(name)?.if, `\${{ matrix.platform == '${platform}' }}`, name);
+    }
+    for (const name of [
+      'Resolve app version and TestFlight build number',
+      'Validate all TestFlight environment inputs',
+      'Install temporary Apple signing credentials',
+      'Locate the built IPA or macOS package',
+      'Remove temporary signing material and build output',
+    ]) {
+      assert.doesNotMatch(step(name)?.if ?? '', /matrix\.platform/, name);
+    }
+  });
+
+  describe('uploads only after the Flutter gate passes', () => {
+    const steps = parsedPublishingWorkflow.jobs['build-upload'].steps;
+    const waitIndex = steps.findIndex((step) => step.name === 'Wait for the Flutter gate');
+    const wait = steps[waitIndex];
+
+    it('waits after building and before either upload, holding no secrets', () => {
+      assert.ok(wait, 'the gate wait step must exist');
+      assert.equal(wait.if, '${{ inputs.local_verification }}');
+      assert.deepEqual(wait.env, { GH_TOKEN: '${{ github.token }}' });
+      assert.doesNotMatch(JSON.stringify(wait), /secrets\./);
+      assert.match(
+        wait.run,
+        /"repos\/\$GITHUB_REPOSITORY\/actions\/runs\/\$GITHUB_RUN_ID\/attempts\/\$GITHUB_RUN_ATTEMPT\/jobs\?per_page=100"/,
+      );
+      assert.match(wait.run, /node scripts\/testflight\/gate-status\.mjs/);
+      assert.match(wait.run, /SECONDS \+ 3600/);
+
+      const index = (name) => steps.findIndex((step) => step.name === name);
+      for (const build of [
+        'Build the iOS/iPadOS TestFlight IPA',
+        'Archive and export the macOS TestFlight package',
+        'Locate the built IPA or macOS package',
+      ]) {
+        assert.ok(index(build) < waitIndex, `${build} runs before the wait`);
+      }
+      for (const upload of ['Upload iOS/iPadOS to TestFlight', 'Upload macOS to TestFlight']) {
+        assert.ok(index(upload) > waitIndex, `${upload} runs after the wait`);
+      }
+    });
+
+    // Runs the step's own script with a stand-in gh and a sleep that only
+    // advances bash's clock, so the deadline can pass in milliseconds.
+    function runWait(ghScript) {
+      const dir = mkdtempSync(join(tmpdir(), 'gate-wait-'));
+      try {
+        const gh = join(dir, 'gh');
+        writeFileSync(gh, `#!/bin/bash\n${ghScript}\n`);
+        chmodSync(gh, 0o755);
+        return spawnSync(
+          'bash',
+          ['-c', `sleep() { SECONDS=$((SECONDS + $1)); }\n${wait.run}`],
+          {
+            encoding: 'utf8',
+            env: {
+              PATH: `${dir}:${process.env.PATH}`,
+              RUNNER_TEMP: dir,
+              GITHUB_REPOSITORY: 'Jerit3787/planner-release',
+              GITHUB_RUN_ID: '1',
+              GITHUB_RUN_ATTEMPT: '1',
+              GH_TOKEN: 'unused',
+            },
+          },
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    const gateJob = (name, conclusion = 'success') => ({ name, status: 'completed', conclusion });
+    const gateJobs = (shardConclusion = 'success') => JSON.stringify({
+      jobs: [
+        gateJob('Flutter lint'),
+        ...[0, 1, 2, 3].map((shard) =>
+          gateJob(`Flutter tests (shard ${shard} of 4)`, shard === 2 ? shardConclusion : 'success')),
+      ],
+    });
+
+    it('goes on to upload once every gate job succeeded', () => {
+      const result = runWait(`cat <<'JSON'\n${gateJobs()}\nJSON`);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+    });
+
+    it('stops without uploading when a gate shard failed', () => {
+      const result = runWait(`cat <<'JSON'\n${gateJobs('failure')}\nJSON`);
+      assert.equal(result.status, 1);
+      assert.match(result.stdout, /::error::The Flutter gate failed/);
+    });
+
+    it('stops without uploading when the gate never finishes', () => {
+      const pending = JSON.stringify({ jobs: [{ name: 'Flutter lint', status: 'in_progress', conclusion: null }] });
+      const result = runWait(`cat <<'JSON'\n${pending}\nJSON`);
+      assert.equal(result.status, 1);
+      assert.match(result.stdout, /::error::Timed out waiting for the Flutter gate/);
+    });
+
+    it('keeps waiting through API errors and still times out', () => {
+      const result = runWait('exit 1');
+      assert.equal(result.status, 1);
+      assert.match(result.stdout, /::error::Timed out waiting for the Flutter gate/);
+    });
   });
 
   it('reports platform outcomes separately and cleans signing material', () => {
