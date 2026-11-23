@@ -239,6 +239,7 @@ describe('TestFlight publishing workflow contract', () => {
       'TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64',
       'TESTFLIGHT_INSTALLER_CERTIFICATE_PASSWORD',
       'TESTFLIGHT_IOS_PROFILE_BASE64',
+      'TESTFLIGHT_IOS_WIDGET_PROFILE_BASE64',
       'TESTFLIGHT_MACOS_PROFILE_BASE64',
     ]) {
       assert.match(buildUpload, new RegExp(`secrets\\.${secret}`));
@@ -269,6 +270,7 @@ describe('TestFlight publishing workflow contract', () => {
       'TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64',
       'TESTFLIGHT_INSTALLER_CERTIFICATE_PASSWORD',
       'TESTFLIGHT_IOS_PROFILE_BASE64',
+      'TESTFLIGHT_IOS_WIDGET_PROFILE_BASE64',
       'TESTFLIGHT_MACOS_PROFILE_BASE64',
     ]) {
       assert.match(preflight, new RegExp(`secrets\\.${secret}`));
@@ -279,6 +281,34 @@ describe('TestFlight publishing workflow contract', () => {
       assert.match(preflight, new RegExp(`${value}: \\$\\{\\{ vars\\.${value} \\}\\}`));
       assert.match(preflight, new RegExp(`-z "\\$${value}"`));
     }
+  });
+
+  // The iOS app embeds FocusActivityWidget.appex, signed manually with its
+  // own App Store profile (planner 7315c59c); TestFlight run 55 failed with
+  // no profile for it.
+  it('installs and removes the iOS widget extension profile', () => {
+    const signingStart = buildUpload.indexOf(
+      'name: Install temporary Apple signing credentials',
+    );
+    const signingEnd = buildUpload.indexOf('\n      - name:', signingStart + 1);
+    const signingStep = buildUpload.slice(signingStart, signingEnd);
+    assert.match(signingStep, /-z "\$TESTFLIGHT_IOS_WIDGET_PROFILE_BASE64"/);
+    assert.match(signingStep, /testflight-ios-widget\.mobileprovision/);
+    assert.match(
+      signingStep,
+      /install_profile \\\s*\n\s*"\$IOS_WIDGET_PROFILE_PATH"/,
+    );
+    for (const file of [
+      'testflight-ios-widget.mobileprovision',
+      'testflight-ios-widget-profile.plist',
+      'testflight-ios-widget-profile-uuid.txt',
+    ]) {
+      assert.match(buildUpload, new RegExp(`rm -f[\\s\\S]*"\\$RUNNER_TEMP/${file.replace(/\./g, '\\.')}"`));
+    }
+    assert.match(
+      buildUpload,
+      /for uuid_file in[\s\S]*testflight-ios-widget-profile-uuid\.txt/,
+    );
   });
 
   it('imports the separate macOS installer identity into the temporary keychain', () => {

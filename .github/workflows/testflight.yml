@@ -346,6 +346,7 @@ jobs:
           TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64: ${{ secrets.TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64 }}
           TESTFLIGHT_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.TESTFLIGHT_INSTALLER_CERTIFICATE_PASSWORD }}
           TESTFLIGHT_IOS_PROFILE_BASE64: ${{ secrets.TESTFLIGHT_IOS_PROFILE_BASE64 }}
+          TESTFLIGHT_IOS_WIDGET_PROFILE_BASE64: ${{ secrets.TESTFLIGHT_IOS_WIDGET_PROFILE_BASE64 }}
           TESTFLIGHT_MACOS_PROFILE_BASE64: ${{ secrets.TESTFLIGHT_MACOS_PROFILE_BASE64 }}
           POWERSYNC_URL: ${{ vars.POWERSYNC_URL }}
           WORKER_URL: ${{ vars.WORKER_URL }}
@@ -359,6 +360,7 @@ jobs:
                 -z "$TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64" || \
                 -z "$TESTFLIGHT_CERTIFICATE_PASSWORD" || \
                 -z "$TESTFLIGHT_IOS_PROFILE_BASE64" || \
+                -z "$TESTFLIGHT_IOS_WIDGET_PROFILE_BASE64" || \
                 -z "$TESTFLIGHT_MACOS_PROFILE_BASE64" || \
                 -z "$TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64" || \
                 -z "$TESTFLIGHT_INSTALLER_CERTIFICATE_PASSWORD" || \
@@ -377,6 +379,7 @@ jobs:
           TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64: ${{ secrets.TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64 }}
           TESTFLIGHT_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.TESTFLIGHT_INSTALLER_CERTIFICATE_PASSWORD }}
           TESTFLIGHT_IOS_PROFILE_BASE64: ${{ secrets.TESTFLIGHT_IOS_PROFILE_BASE64 }}
+          TESTFLIGHT_IOS_WIDGET_PROFILE_BASE64: ${{ secrets.TESTFLIGHT_IOS_WIDGET_PROFILE_BASE64 }}
           TESTFLIGHT_MACOS_PROFILE_BASE64: ${{ secrets.TESTFLIGHT_MACOS_PROFILE_BASE64 }}
         run: |
           set -euo pipefail
@@ -388,6 +391,7 @@ jobs:
                 -z "$TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64" || \
                 -z "$TESTFLIGHT_INSTALLER_CERTIFICATE_PASSWORD" || \
                 -z "$TESTFLIGHT_IOS_PROFILE_BASE64" || \
+                -z "$TESTFLIGHT_IOS_WIDGET_PROFILE_BASE64" || \
                 -z "$TESTFLIGHT_MACOS_PROFILE_BASE64" ]]; then
             echo '::error::One or more required Apple signing secrets are missing.'
             exit 1
@@ -403,10 +407,12 @@ jobs:
           CERTIFICATE_PATH="$RUNNER_TEMP/testflight-distribution.p12"
           INSTALLER_CERTIFICATE_PATH="$RUNNER_TEMP/testflight-installer.p12"
           IOS_PROFILE_PATH="$RUNNER_TEMP/testflight-ios.mobileprovision"
+          IOS_WIDGET_PROFILE_PATH="$RUNNER_TEMP/testflight-ios-widget.mobileprovision"
           MACOS_PROFILE_PATH="$RUNNER_TEMP/testflight-macos.mobileprovision"
           printf '%s' "$TESTFLIGHT_DISTRIBUTION_CERTIFICATE_P12_BASE64" | base64 -D > "$CERTIFICATE_PATH"
           printf '%s' "$TESTFLIGHT_INSTALLER_CERTIFICATE_P12_BASE64" | base64 -D > "$INSTALLER_CERTIFICATE_PATH"
           printf '%s' "$TESTFLIGHT_IOS_PROFILE_BASE64" | base64 -D > "$IOS_PROFILE_PATH"
+          printf '%s' "$TESTFLIGHT_IOS_WIDGET_PROFILE_BASE64" | base64 -D > "$IOS_WIDGET_PROFILE_PATH"
           printf '%s' "$TESTFLIGHT_MACOS_PROFILE_BASE64" | base64 -D > "$MACOS_PROFILE_PATH"
 
           KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
@@ -459,6 +465,11 @@ jobs:
             "$IOS_PROFILE_PATH" \
             "$RUNNER_TEMP/testflight-ios-profile.plist" \
             "$RUNNER_TEMP/testflight-ios-profile-uuid.txt"
+          # The Live Activity widget extension, signed with its own profile.
+          install_profile \
+            "$IOS_WIDGET_PROFILE_PATH" \
+            "$RUNNER_TEMP/testflight-ios-widget-profile.plist" \
+            "$RUNNER_TEMP/testflight-ios-widget-profile-uuid.txt"
           install_profile \
             "$MACOS_PROFILE_PATH" \
             "$RUNNER_TEMP/testflight-macos-profile.plist" \
@@ -652,6 +663,7 @@ jobs:
           PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           for uuid_file in \
             "$RUNNER_TEMP/testflight-ios-profile-uuid.txt" \
+            "$RUNNER_TEMP/testflight-ios-widget-profile-uuid.txt" \
             "$RUNNER_TEMP/testflight-macos-profile-uuid.txt"; do
             [[ -f "$uuid_file" ]] || continue
             profile_uuid=''
@@ -696,10 +708,13 @@ jobs:
             "$RUNNER_TEMP/testflight-distribution.p12" \
             "$RUNNER_TEMP/testflight-installer.p12" \
             "$RUNNER_TEMP/testflight-ios.mobileprovision" \
+            "$RUNNER_TEMP/testflight-ios-widget.mobileprovision" \
             "$RUNNER_TEMP/testflight-macos.mobileprovision" \
             "$RUNNER_TEMP/testflight-ios-profile.plist" \
+            "$RUNNER_TEMP/testflight-ios-widget-profile.plist" \
             "$RUNNER_TEMP/testflight-macos-profile.plist" \
             "$RUNNER_TEMP/testflight-ios-profile-uuid.txt" \
+            "$RUNNER_TEMP/testflight-ios-widget-profile-uuid.txt" \
             "$RUNNER_TEMP/testflight-macos-profile-uuid.txt" \
             "$RUNNER_TEMP/testflight-altool-help.txt" \
             "$RUNNER_TEMP/ios-upload.log" \
