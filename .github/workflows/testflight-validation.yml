@@ -23,7 +23,7 @@ jobs:
 
       - name: Validate workflow YAML syntax
         run: |
-          ruby -e 'require "yaml"; ARGV.each { |path| YAML.load_file(path, aliases: true) }' .github/workflows/testflight.yml .github/workflows/testflight-validation.yml
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.load_file(path, aliases: true) }' .github/workflows/testflight.yml .github/workflows/testflight-validation.yml .github/workflows/web.yml
 
       - name: Run TestFlight validation tests
         run: node --test tests/testflight/*.test.mjs

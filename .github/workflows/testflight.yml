@@ -31,6 +31,11 @@ on:
         required: false
         default: ''
         type: string
+      deploy_web:
+        description: 'Also deploy the web app (dev.planner.danplace.tech) with this build number'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -308,6 +313,45 @@ jobs:
             -f "inputs[build_number]=$BUILD_NUMBER" \
             -f "inputs[notes]=$NOTES"
           echo "Started desktop.yml for 3.0.0 ($BUILD_NUMBER) from ${SOURCE_SHA:0:12}." >> "$GITHUB_STEP_SUMMARY"
+
+  # The web app gets this run's build number too, like desktop, and deploys
+  # from web.yml, which holds the Cloudflare token; this job holds none.
+  web:
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && inputs.deploy_web && needs.validate-production-policy.result == 'success' && ((needs.flutter-lint.result == 'success' && needs.flutter-tests.result == 'success') || (!inputs.local_verification && needs.flutter-lint.result == 'skipped' && needs.flutter-tests.result == 'skipped')) }}
+    needs:
+      - verify-source
+      - validate-production-policy
+      - flutter-lint
+      - flutter-tests
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout the public release repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Start the web deploy
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          BUILD_NUMBER="$(node scripts/testflight/build-number.mjs "$GITHUB_RUN_NUMBER" "$GITHUB_RUN_ATTEMPT")"
+          # One request: a dispatch is not idempotent, so no retry.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/web.yml/dispatches" \
+            -f ref=main \
+            -f "inputs[source_sha]=$SOURCE_SHA" \
+            -f "inputs[build_number]=$BUILD_NUMBER"
+          echo "Started web.yml for 3.0.0 ($BUILD_NUMBER) from ${SOURCE_SHA:0:12}." >> "$GITHUB_STEP_SUMMARY"
 
   # iOS and macOS build on their own runners at the same time. Each leg
   # signs, builds and then, for local verification, waits for the Flutter

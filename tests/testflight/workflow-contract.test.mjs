@@ -79,6 +79,33 @@ describe('TestFlight publishing workflow contract', () => {
     );
   });
 
+  // The web app deploys with this run's build number, like desktop
+  // (web deploys, 2026-11-28), unless the dispatch turns it off.
+  it('dispatches the web deploy with its own build number unless turned off', () => {
+    const trigger = publishingWorkflow.match(/^on:\n([\s\S]*?)^permissions:/m)?.[1];
+    assert.match(
+      trigger,
+      /^      deploy_web:\n        description:[^\n]+\n        required: false\n        default: true\n        type: boolean$/m,
+    );
+    const web = parsedPublishingWorkflow.jobs.web;
+    assert.ok(web, 'missing web job');
+    assert.deepEqual(web.needs, parsedPublishingWorkflow.jobs.desktop.needs);
+    assert.equal(
+      web.if,
+      parsedPublishingWorkflow.jobs.desktop.if.replace("inputs.desktop_notes != ''", 'inputs.deploy_web'),
+    );
+    assert.deepEqual(web.permissions, { actions: 'write', contents: 'read' });
+    const script = web.steps.map((step) => step.run ?? '').join('\n');
+    assert.match(
+      script,
+      /node scripts\/testflight\/build-number\.mjs "\$GITHUB_RUN_NUMBER" "\$GITHUB_RUN_ATTEMPT"/,
+    );
+    assert.match(script, /actions\/workflows\/web\.yml\/dispatches/);
+    for (const input of ['source_sha', 'build_number']) {
+      assert.match(script, new RegExp(`inputs\\[${input}\\]=`));
+    }
+  });
+
   const verifySource = jobBlock(publishingWorkflow, 'verify-source');
   const buildUpload = jobBlock(publishingWorkflow, 'build-upload');
 
@@ -294,11 +321,16 @@ describe('TestFlight publishing workflow contract', () => {
     }
 
     assert.doesNotMatch(publishingWorkflow, /id-token:\s*write/i);
-    // Only the desktop hand-off may start a workflow, and it holds no
-    // secrets: no PAT, no Apple material, just this run's token.
+    // Only the desktop and web hand-offs may start a workflow, and they hold
+    // no secrets: no PAT, no Apple material, just this run's token.
     const desktop = jobBlock(publishingWorkflow, 'desktop');
-    assert.doesNotMatch(publishingWorkflow.replace(desktop, ''), /actions:\s*write/i);
+    const web = jobBlock(publishingWorkflow, 'web');
+    assert.doesNotMatch(
+      publishingWorkflow.replace(desktop, '').replace(web, ''),
+      /actions:\s*write/i,
+    );
     assert.doesNotMatch(desktop, /secrets\./);
+    assert.doesNotMatch(web, /secrets\./);
   });
 
   it('checks all Apple secrets and production runtime variables before decoding signing material', () => {

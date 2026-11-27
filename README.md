@@ -88,6 +88,17 @@ The installer P12 is the `3rd Party Mac Developer Installer` identity pinned by
 `planner/app/macos/ExportOptions.testflight.plist`; it is separate from the app
 distribution identity used to sign the iOS/iPadOS and macOS apps.
 
+Each TestFlight run also deploys the Flutter web app to
+`dev.planner.danplace.tech` (the Cloudflare Worker `planner-web-dev`) through
+`.github/workflows/web.yml`, from the same source commit and with the same
+build number as its Apple and desktop builds. Untick `deploy_web` to skip it.
+The deploy needs the repository secret `CLOUDFLARE_API_TOKEN` (Workers deploy
+rights on the account that owns `planner-web-dev`) and the repository variable
+`PLANNER_APPCHECK_SITE_KEY` (the web reCAPTCHA v3 site key registered for App
+Check). `CLOUDFLARE_ACCOUNT_ID` is an optional variable for tokens that reach
+more than one account. `planner.danplace.tech` is a different site: the legacy
+web app on Cloudflare Pages, built from the private repository's `main`.
+
 An Apple CLI upload being accepted means **accepted for processing**, not that
 the build has completed processing or reached the PE Personal internal group.
 Verify both platform results independently; a one-platform upload is a partial
