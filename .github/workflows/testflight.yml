@@ -48,7 +48,7 @@ jobs:
       - name: Set up Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
 
       - name: Validate source dispatch inputs
         id: source-inputs
@@ -164,7 +164,7 @@ jobs:
       - name: Set up Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
 
       - name: Validate production release policies
         working-directory: planner
@@ -290,7 +290,7 @@ jobs:
       - name: Set up Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
 
       - name: Start the Windows and Linux build
         shell: bash
@@ -345,7 +345,7 @@ jobs:
       - name: Set up Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
 
       - name: Set up Flutter 3.50.1
         uses: subosito/flutter-action@v2.23.0
