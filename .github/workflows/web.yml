@@ -1,0 +1,143 @@
+name: Web (dev.planner.danplace.tech)
+
+# Builds the Flutter web app and deploys it to the Cloudflare Worker
+# planner-web-dev (static assets), which serves dev.planner.danplace.tech.
+# TestFlight dispatches this with its own build number, so the web app is
+# the same source commit and the same 3.0.0 (<build number>) as the iOS,
+# macOS and desktop builds of that run (web deploys, 2026-11-28). It uses
+# the same production settings as those builds.
+#
+# planner.danplace.tech is a different site: the legacy web app on
+# Cloudflare Pages, built from the private repository's main branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 'Exact private planner commit to build'
+        required: true
+        type: string
+      build_number:
+        description: 'Build number, as in 3.0.0 (4601)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-release
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy the web app
+    runs-on: ubuntu-latest
+    env:
+      POWERSYNC_URL: ${{ vars.POWERSYNC_URL }}
+      WORKER_URL: ${{ vars.WORKER_URL }}
+      GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
+      PLANNER_APPLE_SERVICES_ID: ${{ vars.PLANNER_APPLE_SERVICES_ID }}
+      # A reCAPTCHA v3 site key is public: it ships in main.dart.js.
+      PLANNER_APPCHECK_SITE_KEY: ${{ vars.PLANNER_APPCHECK_SITE_KEY }}
+    steps:
+      - name: Check the build settings are present
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+          HAS_CLOUDFLARE_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::source_sha must be a full 40-character commit.'; exit 1; }
+          [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]{0,8}$ ]] || { echo '::error::build_number must be a positive whole number.'; exit 1; }
+          for name in POWERSYNC_URL WORKER_URL GOOGLE_WEB_CLIENT_ID PLANNER_APPLE_SERVICES_ID PLANNER_APPCHECK_SITE_KEY; do
+            [ -n "${!name}" ] || { echo "::error::Repository variable $name is not set."; exit 1; }
+          done
+          [ "$HAS_CLOUDFLARE_TOKEN" = 'true' ] || { echo '::error::Repository secret CLOUDFLARE_API_TOKEN is not set.'; exit 1; }
+
+      - name: Checkout the private planner revision
+        uses: actions/checkout@v7
+        with:
+          repository: Jerit3787/planner
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.PLANNER_PAT }}
+          path: planner
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Validate the production web release policy
+        working-directory: planner
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/release/release-policy.mjs --environment prod --target web
+
+      - name: Set up Flutter 3.50.1
+        uses: subosito/flutter-action@v2.23.0
+        with:
+          channel: stable
+          flutter-version: '3.50.1'
+          cache: true
+
+      - name: Resolve the app version
+        id: version
+        shell: bash
+        env:
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          APP_VERSION="$(awk '$1 == "version:" { print $2; exit }' planner/app/pubspec.yaml)"
+          APP_VERSION="${APP_VERSION%%+*}"
+          [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '::error::The app version must be x.y.z.'; exit 1; }
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build the web app
+        shell: bash
+        working-directory: planner/app
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          flutter config --no-analytics
+          flutter pub get
+          flutter build web --release \
+            --pwa-strategy=none \
+            --no-web-resources-cdn \
+            --build-name "$APP_VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --dart-define=PLANNER_ENV=prod \
+            --dart-define="POWERSYNC_URL=$POWERSYNC_URL" \
+            --dart-define="WORKER_URL=$WORKER_URL" \
+            --dart-define="GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID" \
+            --dart-define="PLANNER_APPLE_SERVICES_ID=$PLANNER_APPLE_SERVICES_ID" \
+            --dart-define="PLANNER_APPCHECK_SITE_KEY=$PLANNER_APPCHECK_SITE_KEY"
+
+      - name: Add the offline service worker and verify the build
+        shell: bash
+        working-directory: planner
+        run: |
+          set -euo pipefail
+          npm run build:pwa-worker
+          npm run verify:web -- app/build/web
+
+      - name: Deploy to Cloudflare
+        shell: bash
+        working-directory: planner/app
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || unset CLOUDFLARE_ACCOUNT_ID
+          npm ci --no-audit --no-fund
+          npx wrangler deploy --message "$APP_VERSION ($BUILD_NUMBER) ${SOURCE_SHA:0:12}"
+          echo "Deployed $APP_VERSION ($BUILD_NUMBER) from ${SOURCE_SHA:0:12} to https://dev.planner.danplace.tech." >> "$GITHUB_STEP_SUMMARY"
